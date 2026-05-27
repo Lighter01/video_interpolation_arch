@@ -1,0 +1,30 @@
+candidate_id: ema_vfi_small_candidate
+dataset_version_id: stage1_default
+test_manifest_path: dataset_versions/stage1_default/test_all.csv
+output_dir: outputs/candidate_validation/ema_vfi_small/stage1_default
+model:
+  model_name: ema_vfi_small
+  repo_name: EMA-VFI
+  checkpoint_path: EMA-VFI/ours_small.pkl
+  device: cuda
+  tta: false
+  fast_tta: false
+  divisor: 32
+  strict_checkpoint: true
+thresholds:
+  min_psnr_mean: 25.0
+  min_ssim_mean: 0.80
+  max_lpips_mean: null
+limit_samples: null
+compute_lpips: true
+lpips_device: cpu
+lpips_net: alex
+save_predictions: true
+prediction_limit: 16
+mlflow:
+  enabled: true
+  experiment_name: stage1-ema-validation
+  run_name: ema_vfi_small_candidate_stage1_default
+  tags:
+    stage: stage1
+    workflow: ema_candidate_validation

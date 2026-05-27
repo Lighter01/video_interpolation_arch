@@ -1,0 +1,28 @@
+dataset_version_id: stage1_default
+source_index_path: global_sequence_index.csv
+output_root: dataset_versions
+split_seed: 42
+split_ratios:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+selected_source_groups: []
+triplet_policy: wide_triplet
+mixing_mode: data_accumulation
+old_source_groups:
+  - vimeo
+new_source_groups:
+  - anime
+  - small_example
+old_min_ratio: 0.70
+new_max_ratio: 0.30
+new_min_ratio: 0.20
+old_max_ratio: 0.80
+train_budget: null
+limit_sequences: null
+validate_frame_paths: true
+frame_name_pattern: auto
+preprocessing:
+  canonical_frame_format: png
+  interpolation_mode: 2x
+  t_value: 0.5

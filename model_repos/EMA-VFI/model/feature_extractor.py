@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.layers import DropPath, to_2tuple, trunc_normal_
 
 def window_partition(x, window_size):
     B, H, W, C = x.shape

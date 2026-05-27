@@ -1,0 +1,8 @@
+model_name: ema_vfi_small
+repo_name: EMA-VFI
+checkpoint_path: EMA-VFI/ours_small.pkl
+device: cuda
+tta: false
+fast_tta: false
+divisor: 32
+strict_checkpoint: true

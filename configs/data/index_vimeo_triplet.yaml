@@ -1,0 +1,8 @@
+source_dir: sources/vimeo_triplet
+source_group: vimeo
+source_dataset: vimeo_triplet
+train_list: tri_trainlist.txt
+test_list: tri_testlist.txt
+output_path: null
+limit: null
+validate_images: true

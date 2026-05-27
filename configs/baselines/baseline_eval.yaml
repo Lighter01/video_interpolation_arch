@@ -1,0 +1,19 @@
+manifest_path: dataset_versions/stage1_default/test_all.csv
+output_dir: outputs/baselines/stage1_default
+baselines:
+  - duplicate_left
+  - blend
+  - farneback
+limit_samples: null
+compute_lpips: true
+lpips_device: cpu
+lpips_net: alex
+save_predictions: true
+prediction_limit: 16
+mlflow:
+  enabled: true
+  experiment_name: stage1-baselines-no-ml
+  run_name: baseline_no_ml
+  tags:
+    stage: stage1
+    workflow: baseline_eval

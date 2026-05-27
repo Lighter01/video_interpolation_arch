@@ -1,0 +1,6 @@
+source_index_globs:
+  - sources/*/sequence_index.csv
+source_index_paths: []
+selected_source_groups: []
+output_path: global_sequence_index.csv
+limit: null

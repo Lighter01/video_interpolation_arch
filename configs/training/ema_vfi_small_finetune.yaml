@@ -1,0 +1,29 @@
+train_manifest_path: dataset_versions/stage1_default/train_all.csv
+val_manifest_path: dataset_versions/stage1_default/val_all.csv
+output_dir: outputs/training/ema_vfi_small/stage1_default
+model:
+  model_name: ema_vfi_small
+  repo_name: EMA-VFI
+  checkpoint_path: EMA-VFI/ours_small.pkl
+  device: cuda
+  tta: false
+  fast_tta: false
+  divisor: 32
+  strict_checkpoint: true
+mode: finetune
+seed: 42
+batch_size: 1
+num_workers: 0
+max_epochs: 1
+max_steps: 1000
+learning_rate: 0.00002
+validate_every_steps: 100
+limit_train_samples: null
+limit_val_samples: 64
+mlflow:
+  enabled: true
+  experiment_name: stage1-ema-training
+  run_name: ema_vfi_small_finetune_stage1_default
+  tags:
+    stage: stage1
+    workflow: ema_finetune
