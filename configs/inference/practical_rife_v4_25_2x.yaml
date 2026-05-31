@@ -1,14 +1,14 @@
 input_path: raw_data/tmp_test/Dora.mp4
-output_path: outputs/inference/ema_vfi_small/dora_2x.mp4
+output_path: outputs/inference/practical_rife_v4_25/dora_2x.mp4
 model:
-  model_name: ema_vfi_small
-  repo_name: EMA-VFI
-  checkpoint_path: EMA-VFI/ours_small.pkl
+  model_name: practical_rife_v4_25
+  repo_name: Practical-RIFE
+  checkpoint_path: Practical-RIFE/RIFEv4.25/train_log
   device: cuda
-  tta: false
-  fast_tta: false
-  divisor: 32
-  strict_checkpoint: true
+  timestep: 0.5
+  scale: 1.0
+  divisor: 128
+  strict_checkpoint: false
 limit_pairs: null
 output_fps_multiplier: 2.0
 
@@ -52,8 +52,8 @@ encoder_options_by_codec:
 encoder_options: {}
 mlflow:
   enabled: true
-  experiment_name: stage1-ema-inference
-  run_name: ema_vfi_small_2x
+  experiment_name: stage1-rife-inference
+  run_name: practical_rife_v4_25_2x
   tags:
     stage: stage1
-    workflow: ema_video_inference
+    workflow: practical_rife_video_inference

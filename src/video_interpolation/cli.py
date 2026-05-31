@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +22,21 @@ from .baselines import (
     with_baseline_output_dir,
     with_baseline_save_predictions,
 )
+from .batch_inference import (
+    BatchInferenceVideo,
+    batch_measurements_path,
+    batch_output_path,
+    batch_run_name,
+    discover_inference_videos,
+    resolve_batch_target_names,
+    write_batch_measurements_csv,
+)
 from .adapters.base import AdapterEnvironmentReport, ModelAdapterError
+from .adapters.amt import AMTAdapter, AMTAdapterConfig
+from .adapters.baseline import BaselineAdapter, BaselineAdapterConfig, with_baseline_adapter_name
 from .adapters.ema_vfi import EMAVFIAdapter, EMAVFIAdapterConfig
+from .adapters.rife import PracticalRIFEAdapter, PracticalRIFEAdapterConfig
+from .amt_preflight import run_amt_s_preflight
 from .data.datasets import UniversalTripletDataset
 from .data.indexing import (
     GlobalIndexConfig,
@@ -56,7 +71,9 @@ from .inference import (
     VideoInferenceConfig,
     VideoInferenceResult,
     run_ema_video_inference,
+    run_video_inference,
     with_inference_checkpoint,
+    with_inference_codec,
     with_inference_config_path,
     with_inference_input,
     with_inference_limit,
@@ -64,6 +81,7 @@ from .inference import (
     with_inference_output,
 )
 from .mlflow import MlflowLoggingError, MlflowRunConfig, MlflowSmokeResult, run_mlflow_smoke
+from .rife_preflight import run_practical_rife_preflight
 from .settings import load_settings
 from .training import (
     EMATrainingConfig,
@@ -80,6 +98,7 @@ from .validation import (
     CandidateValidationConfig,
     CandidateValidationResult,
     validate_candidate,
+    validate_candidate_with_adapter,
     with_validation_checkpoint,
     with_validation_config_path,
     with_validation_limit,
@@ -98,7 +117,64 @@ data_app = typer.Typer(help="Data preprocessing and source indexing commands.")
 baseline_app = typer.Typer(help="Baseline evaluation commands.")
 mlflow_app = typer.Typer(help="MLflow infrastructure and logging checks.")
 ema_app = typer.Typer(help="EMA-VFI-small adapter, inference, training, and validation commands.")
+amt_app = typer.Typer(help="AMT-S adapter, inference, and validation commands.")
+rife_app = typer.Typer(help="Practical-RIFE adapter, inference, and validation commands.")
 console = Console()
+
+BATCH_TARGET_ALIASES: dict[str, tuple[str, ...]] = {
+    "all": (
+        "practical_rife_v4_25",
+        "amt_s",
+        "ema_vfi_small",
+        "baseline_duplicate_left",
+        "baseline_blend",
+        "baseline_farneback",
+    ),
+    "models": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
+    "model": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
+    "neural": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
+    "baselines": ("baseline_duplicate_left", "baseline_blend", "baseline_farneback"),
+    "baseline": ("baseline_duplicate_left", "baseline_blend", "baseline_farneback"),
+    "rife": ("practical_rife_v4_25",),
+    "amt": ("amt_s",),
+    "ema": ("ema_vfi_small",),
+    "duplicate_left": ("baseline_duplicate_left",),
+    "blend": ("baseline_blend",),
+    "farneback": ("baseline_farneback",),
+}
+
+
+@dataclass(frozen=True)
+class _InferenceTarget:
+    name: str
+    label: str
+    config_path: Path
+    output_group: Path
+    model_config_factory: Callable[[dict[str, Any] | None], Any]
+    adapter_factory: Callable[[Any, Any], Any]
+    mlflow_mode: str
+    baseline_name: str | None = None
+
+
+@dataclass(frozen=True)
+class _BatchInferenceRecord:
+    target_name: str
+    input_video: Path
+    relative_input_video: Path
+    output_video: Path | None
+    status: str
+    pairs_processed: int | None = None
+    frames_written: int | None = None
+    input_fps: float | None = None
+    output_fps: float | None = None
+    model_inference_elapsed_sec: float | None = None
+    total_elapsed_sec: float | None = None
+    model_pairs_per_sec: float | None = None
+    total_pairs_per_sec: float | None = None
+    audio_streams_available: int | None = None
+    audio_streams_preserved: int | None = None
+    mlflow_run_id: str | None = None
+    error: str | None = None
 
 
 @app.command("show-settings")
@@ -115,8 +191,199 @@ def show_settings() -> None:
     console.print(table)
 
 
-def _print_preflight_report(report: PreflightReport) -> None:
-    table = Table(title=f"EMA-VFI-small preflight: {report.status}")
+@app.command("infer-all-videos")
+def infer_all_videos(
+    input_dir: Path = typer.Option(
+        ...,
+        "--input-dir",
+        help="Directory containing input videos. Required; no default input directory is used.",
+    ),
+    output_root: Path = typer.Option(
+        Path("outputs/inference"),
+        "--output-root",
+        help="Root directory for output videos.",
+    ),
+    limit_videos: int | None = typer.Option(
+        None,
+        "--limit-videos",
+        min=1,
+        help="Optional maximum number of discovered videos to process.",
+    ),
+    limit_pairs: int | None = typer.Option(
+        None,
+        "--limit-pairs",
+        min=1,
+        help="Optional cap on neighboring frame pairs per video for smoke runs.",
+    ),
+    codec: str | None = typer.Option(
+        None,
+        "--codec",
+        help="Override FFmpeg/PyAV encoder for all outputs, for example libx264 or h264_nvenc.",
+    ),
+    target_selection: list[str] | None = typer.Option(
+        None,
+        "--target",
+        "--method",
+        help=(
+            "Inference target or subgroup to run. Repeat for multiple values. "
+            "Examples: ema_vfi_small, amt_s, practical_rife_v4_25, blend, farneback, models, baselines."
+        ),
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for every inference run.",
+    ),
+    continue_on_error: bool = typer.Option(
+        True,
+        "--continue-on-error/--fail-fast",
+        help="Continue remaining videos/targets after a failed run, or stop at the first failure.",
+    ),
+) -> None:
+    """Run every Stage 1 model and baseline method over every video in a directory."""
+    settings = load_settings()
+    resolved_input_dir = settings.resolve_path(input_dir)
+    resolved_output_root = settings.resolve_path(output_root)
+    try:
+        videos = discover_inference_videos(resolved_input_dir, limit_videos=limit_videos)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not videos:
+        console.print(f"[red]No supported input videos found under: {resolved_input_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        targets = _selected_inference_targets(_inference_targets(), target_selection)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        "[bold]Running selected Stage 1 video inference targets[/bold]\n"
+        f"videos={len(videos)} targets={len(targets)} output_root={resolved_output_root}"
+    )
+    records: list[_BatchInferenceRecord] = []
+
+    with _progress() as progress:
+        jobs_task = progress.add_task("Inference jobs", total=len(videos) * len(targets))
+        pairs_task = progress.add_task("Current frame pairs", total=None, visible=False)
+
+        for target in targets:
+            try:
+                target_config = _load_batch_target_config(
+                    target,
+                    limit_pairs=limit_pairs,
+                    codec=codec,
+                    disable_mlflow=disable_mlflow,
+                )
+                adapter = target.adapter_factory(target_config.model, settings)
+                adapter.load_checkpoint()
+            except (ModelAdapterError, FileNotFoundError, ValueError) as exc:
+                console.print(f"[red]{target.label} setup failed:[/red] {exc}")
+                for video in videos:
+                    records.append(
+                        _BatchInferenceRecord(
+                            target_name=target.name,
+                            input_video=video.input_path,
+                            relative_input_video=video.relative_path,
+                            output_video=None,
+                            status="failed",
+                            error=str(exc),
+                        )
+                    )
+                    progress.advance(jobs_task)
+                if not continue_on_error:
+                    measurement_paths = _write_batch_measurement_files(records, targets, resolved_output_root)
+                    _print_batch_inference_summary(records, measurement_paths)
+                    raise typer.Exit(code=1) from exc
+                continue
+
+            try:
+                for video in videos:
+                    run_config = _batch_video_config(target_config, target, video, resolved_output_root)
+
+                    def on_progress(event: str, payload: dict[str, object]) -> None:
+                        if event == "start":
+                            total = int(payload.get("total") or 0)
+                            progress.update(
+                                pairs_task,
+                                description=f"{target.name}: {video.relative_path}",
+                                total=total if total > 0 else None,
+                                completed=0,
+                                visible=True,
+                            )
+                        elif event == "encoding_start":
+                            console.print(
+                                "[dim]encoding "
+                                f"{payload['output_path']} "
+                                f"codec={payload['codec']} "
+                                f"fps={float(payload['output_fps']):.4f} "
+                                f"audio={payload['audio_streams_to_preserve']}/"
+                                f"{payload['audio_streams_available']}[/dim]"
+                            )
+                        elif event == "pair_advanced":
+                            progress.advance(pairs_task)
+
+                    try:
+                        result = run_video_inference(
+                            run_config,
+                            adapter_factory=target.adapter_factory,
+                            settings=settings,
+                            adapter=adapter,
+                            progress_callback=on_progress,
+                            mlflow_mode=target.mlflow_mode,
+                        )
+                        records.append(
+                            _BatchInferenceRecord(
+                                target_name=target.name,
+                                input_video=video.input_path,
+                                relative_input_video=video.relative_path,
+                                output_video=result.output_path,
+                                status="ok",
+                                pairs_processed=result.pairs_processed,
+                                frames_written=result.frames_written,
+                                input_fps=result.input_fps,
+                                output_fps=result.output_fps,
+                                model_inference_elapsed_sec=result.model_inference_elapsed_sec,
+                                total_elapsed_sec=result.total_elapsed_sec,
+                                model_pairs_per_sec=result.model_pairs_per_sec,
+                                total_pairs_per_sec=result.total_pairs_per_sec,
+                                audio_streams_available=result.audio_streams_available,
+                                audio_streams_preserved=result.audio_streams_preserved,
+                                mlflow_run_id=result.mlflow_run_id,
+                            )
+                        )
+                    except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+                        records.append(
+                            _BatchInferenceRecord(
+                                target_name=target.name,
+                                input_video=video.input_path,
+                                relative_input_video=video.relative_path,
+                                output_video=run_config.output_path,
+                                status="failed",
+                                error=str(exc),
+                            )
+                        )
+                        console.print(f"[red]{target.label} failed on {video.relative_path}:[/red] {exc}")
+                        if not continue_on_error:
+                            measurement_paths = _write_batch_measurement_files(records, targets, resolved_output_root)
+                            _print_batch_inference_summary(records, measurement_paths)
+                            raise typer.Exit(code=1) from exc
+                    finally:
+                        progress.advance(jobs_task)
+                        progress.update(pairs_task, visible=False)
+            finally:
+                adapter.close()
+
+    measurement_paths = _write_batch_measurement_files(records, targets, resolved_output_root)
+    _print_batch_inference_summary(records, measurement_paths)
+    if any(record.status != "ok" for record in records):
+        raise typer.Exit(code=1)
+
+
+def _print_preflight_report(report: PreflightReport, title: str = "EMA-VFI-small preflight") -> None:
+    table = Table(title=f"{title}: {report.status}")
     table.add_column("Check")
     table.add_column("Status")
     table.add_column("Detail")
@@ -155,6 +422,50 @@ def ema_preflight(
     """Check whether EMA-VFI-small can be imported, initialized, and loaded."""
     report = run_ema_vfi_small_preflight()
     _print_preflight_report(report)
+
+    if report.status == "failed" or (report.status == "blocked" and fail_on_blocked):
+        raise typer.Exit(code=1)
+
+
+@app.command("amt-preflight")
+def amt_preflight(
+    config: Path = typer.Option(
+        Path("configs/models/amt_s.yaml"),
+        "--config",
+        help="YAML config with AMT-S adapter parameters.",
+    ),
+    fail_on_blocked: bool = typer.Option(
+        False,
+        "--fail-on-blocked/--no-fail-on-blocked",
+        help="Return a non-zero exit code when compatibility is blocked.",
+    ),
+) -> None:
+    """Check whether AMT-S can be imported, initialized, and loaded."""
+    adapter_config = AMTAdapterConfig.from_mapping(_load_yaml_mapping(config))
+    report = run_amt_s_preflight(adapter_config)
+    _print_preflight_report(report, title="AMT-S preflight")
+
+    if report.status == "failed" or (report.status == "blocked" and fail_on_blocked):
+        raise typer.Exit(code=1)
+
+
+@app.command("rife-preflight")
+def rife_preflight(
+    config: Path = typer.Option(
+        Path("configs/models/practical_rife_v4_25.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE adapter parameters.",
+    ),
+    fail_on_blocked: bool = typer.Option(
+        False,
+        "--fail-on-blocked/--no-fail-on-blocked",
+        help="Return a non-zero exit code when compatibility is blocked.",
+    ),
+) -> None:
+    """Check whether Practical-RIFE can be imported, initialized, and loaded."""
+    adapter_config = PracticalRIFEAdapterConfig.from_mapping(_load_yaml_mapping(config))
+    report = run_practical_rife_preflight(adapter_config)
+    _print_preflight_report(report, title="Practical-RIFE preflight")
 
     if report.status == "failed" or (report.status == "blocked" and fail_on_blocked):
         raise typer.Exit(code=1)
@@ -211,6 +522,11 @@ def ema_infer_video(
         "--checkpoint",
         help="Override EMA checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
     ),
+    codec: str | None = typer.Option(
+        None,
+        "--codec",
+        help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -224,6 +540,7 @@ def ema_infer_video(
     inference_config = with_inference_output(inference_config, output_path)
     inference_config = with_inference_limit(inference_config, limit_pairs)
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
+    inference_config = with_inference_codec(inference_config, codec)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     console.print(f"[bold]Running EMA-VFI-small video inference:[/bold] {inference_config.input_path}")
 
@@ -234,6 +551,8 @@ def ema_infer_video(
             if event == "start":
                 total = int(payload.get("total") or 0)
                 progress.update(pairs_task, total=total if total > 0 else None)
+            elif event == "encoding_start":
+                _print_inference_encoding_settings(payload)
             elif event == "pair_advanced":
                 progress.advance(pairs_task)
 
@@ -384,6 +703,364 @@ def ema_validate_candidate(
 
         try:
             result = validate_candidate(validation_config, progress_callback=on_progress)
+        except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+    _print_candidate_validation_summary(result)
+
+
+@amt_app.command("adapter-check")
+def amt_adapter_check(
+    config: Path = typer.Option(
+        Path("configs/models/amt_s.yaml"),
+        "--config",
+        help="YAML config with AMT-S adapter parameters.",
+    ),
+    fail_on_blocked: bool = typer.Option(
+        False,
+        "--fail-on-blocked/--no-fail-on-blocked",
+        help="Return a non-zero exit code when compatibility is blocked.",
+    ),
+) -> None:
+    """Check AMT-S adapter prerequisites without running inference."""
+    adapter_config = AMTAdapterConfig.from_mapping(_load_yaml_mapping(config))
+    adapter = AMTAdapter(adapter_config)
+    report = adapter.validate_environment()
+    adapter.close()
+    _print_adapter_environment_report("AMT-S adapter", report)
+    if report.status == "failed" or (report.status == "blocked" and fail_on_blocked):
+        raise typer.Exit(code=1)
+
+
+@amt_app.command("infer-video")
+def amt_infer_video(
+    config: Path = typer.Option(
+        Path("configs/inference/amt_s_2x.yaml"),
+        "--config",
+        help="YAML config with AMT-S local video inference parameters.",
+    ),
+    input_path: Path | None = typer.Option(
+        None,
+        "--input",
+        help="Override input video path.",
+    ),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Override output video path.",
+    ),
+    limit_pairs: int | None = typer.Option(
+        None,
+        "--limit-pairs",
+        min=1,
+        help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override AMT-S checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    codec: str | None = typer.Option(
+        None,
+        "--codec",
+        help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for a tiny local smoke run.",
+    ),
+) -> None:
+    """Run local 2x video inference with AMT-S."""
+    inference_config = VideoInferenceConfig.from_mapping(
+        _load_yaml_mapping(config),
+        model_config_factory=AMTAdapterConfig.from_mapping,
+    )
+    inference_config = with_inference_config_path(inference_config, config)
+    inference_config = with_inference_input(inference_config, input_path)
+    inference_config = with_inference_output(inference_config, output_path)
+    inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
+    inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
+    console.print(f"[bold]Running AMT-S video inference:[/bold] {inference_config.input_path}")
+
+    with _progress() as progress:
+        pairs_task = progress.add_task("Frame pairs", total=None)
+
+        def on_progress(event: str, payload: dict[str, object]) -> None:
+            if event == "start":
+                total = int(payload.get("total") or 0)
+                progress.update(pairs_task, total=total if total > 0 else None)
+            elif event == "encoding_start":
+                _print_inference_encoding_settings(payload)
+            elif event == "pair_advanced":
+                progress.advance(pairs_task)
+
+        try:
+            result = run_video_inference(
+                inference_config,
+                adapter_factory=lambda model_config, settings: AMTAdapter(model_config, settings=settings),
+                progress_callback=on_progress,
+                mlflow_mode="amt_video_inference",
+            )
+        except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+    _print_video_inference_summary(result)
+
+
+@amt_app.command("validate-candidate")
+def amt_validate_candidate(
+    config: Path = typer.Option(
+        Path("configs/validation/amt_s_candidate.yaml"),
+        "--config",
+        help="YAML config with AMT-S candidate validation parameters.",
+    ),
+    manifest: Path | None = typer.Option(
+        None,
+        "--manifest",
+        help="Override test manifest path. Use test_all.csv, not train/val manifests.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output-dir",
+        help="Override candidate validation output directory.",
+    ),
+    limit_samples: int | None = typer.Option(
+        None,
+        "--limit-samples",
+        min=1,
+        help="Optional sample cap for smoke runs.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override candidate checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    no_lpips: bool = typer.Option(
+        False,
+        "--no-lpips",
+        help="Disable LPIPS for a fast CPU smoke run.",
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for a tiny local smoke run.",
+    ),
+) -> None:
+    """Validate an AMT-S checkpoint candidate on a test manifest."""
+    validation_config = CandidateValidationConfig.from_mapping(
+        _load_yaml_mapping(config),
+        model_config_factory=AMTAdapterConfig.from_mapping,
+    )
+    validation_config = with_validation_config_path(validation_config, config)
+    validation_config = with_validation_manifest(validation_config, manifest)
+    validation_config = with_validation_output_dir(validation_config, output_dir)
+    validation_config = with_validation_limit(validation_config, limit_samples)
+    validation_config = with_validation_checkpoint(validation_config, checkpoint_path)
+    validation_config = with_validation_lpips(validation_config, False if no_lpips else None)
+    validation_config = with_validation_mlflow_disabled(validation_config, disable_mlflow)
+    console.print(f"[bold]Validating AMT-S candidate:[/bold] {validation_config.candidate_id}")
+
+    with _progress() as progress:
+        samples_task = progress.add_task("Candidate samples", total=None)
+
+        def on_progress(event: str, payload: dict[str, object]) -> None:
+            if event == "start":
+                progress.update(samples_task, total=int(payload["total"]))
+            elif event == "sample_advanced":
+                progress.advance(samples_task)
+
+        try:
+            result = validate_candidate_with_adapter(
+                validation_config,
+                adapter_factory=lambda model_config, settings: AMTAdapter(model_config, settings=settings),
+                progress_callback=on_progress,
+                model_adapter_label="AMTAdapter",
+                mlflow_mode="amt_candidate_validation",
+            )
+        except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+    _print_candidate_validation_summary(result)
+
+
+@rife_app.command("adapter-check")
+def rife_adapter_check(
+    config: Path = typer.Option(
+        Path("configs/models/practical_rife_v4_25.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE adapter parameters.",
+    ),
+    fail_on_blocked: bool = typer.Option(
+        False,
+        "--fail-on-blocked/--no-fail-on-blocked",
+        help="Return a non-zero exit code when compatibility is blocked.",
+    ),
+) -> None:
+    """Check Practical-RIFE adapter prerequisites without running inference."""
+    adapter_config = PracticalRIFEAdapterConfig.from_mapping(_load_yaml_mapping(config))
+    adapter = PracticalRIFEAdapter(adapter_config)
+    report = adapter.validate_environment()
+    adapter.close()
+    _print_adapter_environment_report("Practical-RIFE adapter", report)
+    if report.status == "failed" or (report.status == "blocked" and fail_on_blocked):
+        raise typer.Exit(code=1)
+
+
+@rife_app.command("infer-video")
+def rife_infer_video(
+    config: Path = typer.Option(
+        Path("configs/inference/practical_rife_v4_25_2x.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE local video inference parameters.",
+    ),
+    input_path: Path | None = typer.Option(
+        None,
+        "--input",
+        help="Override input video path.",
+    ),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Override output video path.",
+    ),
+    limit_pairs: int | None = typer.Option(
+        None,
+        "--limit-pairs",
+        min=1,
+        help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override Practical-RIFE train_log checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    codec: str | None = typer.Option(
+        None,
+        "--codec",
+        help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for a tiny local smoke run.",
+    ),
+) -> None:
+    """Run local 2x video inference with Practical-RIFE."""
+    inference_config = VideoInferenceConfig.from_mapping(
+        _load_yaml_mapping(config),
+        model_config_factory=PracticalRIFEAdapterConfig.from_mapping,
+    )
+    inference_config = with_inference_config_path(inference_config, config)
+    inference_config = with_inference_input(inference_config, input_path)
+    inference_config = with_inference_output(inference_config, output_path)
+    inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
+    inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
+    console.print(f"[bold]Running Practical-RIFE video inference:[/bold] {inference_config.input_path}")
+
+    with _progress() as progress:
+        pairs_task = progress.add_task("Frame pairs", total=None)
+
+        def on_progress(event: str, payload: dict[str, object]) -> None:
+            if event == "start":
+                total = int(payload.get("total") or 0)
+                progress.update(pairs_task, total=total if total > 0 else None)
+            elif event == "encoding_start":
+                _print_inference_encoding_settings(payload)
+            elif event == "pair_advanced":
+                progress.advance(pairs_task)
+
+        try:
+            result = run_video_inference(
+                inference_config,
+                adapter_factory=lambda model_config, settings: PracticalRIFEAdapter(model_config, settings=settings),
+                progress_callback=on_progress,
+                mlflow_mode="practical_rife_video_inference",
+            )
+        except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+    _print_video_inference_summary(result)
+
+
+@rife_app.command("validate-candidate")
+def rife_validate_candidate(
+    config: Path = typer.Option(
+        Path("configs/validation/practical_rife_v4_25_candidate.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE candidate validation parameters.",
+    ),
+    manifest: Path | None = typer.Option(
+        None,
+        "--manifest",
+        help="Override test manifest path. Use test_all.csv, not train/val manifests.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output-dir",
+        help="Override candidate validation output directory.",
+    ),
+    limit_samples: int | None = typer.Option(
+        None,
+        "--limit-samples",
+        min=1,
+        help="Optional sample cap for smoke runs.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override candidate train_log checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    no_lpips: bool = typer.Option(
+        False,
+        "--no-lpips",
+        help="Disable LPIPS for a fast CPU smoke run.",
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for a tiny local smoke run.",
+    ),
+) -> None:
+    """Validate a Practical-RIFE checkpoint candidate on a test manifest."""
+    validation_config = CandidateValidationConfig.from_mapping(
+        _load_yaml_mapping(config),
+        model_config_factory=PracticalRIFEAdapterConfig.from_mapping,
+    )
+    validation_config = with_validation_config_path(validation_config, config)
+    validation_config = with_validation_manifest(validation_config, manifest)
+    validation_config = with_validation_output_dir(validation_config, output_dir)
+    validation_config = with_validation_limit(validation_config, limit_samples)
+    validation_config = with_validation_checkpoint(validation_config, checkpoint_path)
+    validation_config = with_validation_lpips(validation_config, False if no_lpips else None)
+    validation_config = with_validation_mlflow_disabled(validation_config, disable_mlflow)
+    console.print(f"[bold]Validating Practical-RIFE candidate:[/bold] {validation_config.candidate_id}")
+
+    with _progress() as progress:
+        samples_task = progress.add_task("Candidate samples", total=None)
+
+        def on_progress(event: str, payload: dict[str, object]) -> None:
+            if event == "start":
+                progress.update(samples_task, total=int(payload["total"]))
+            elif event == "sample_advanced":
+                progress.advance(samples_task)
+
+        try:
+            result = validate_candidate_with_adapter(
+                validation_config,
+                adapter_factory=lambda model_config, settings: PracticalRIFEAdapter(model_config, settings=settings),
+                progress_callback=on_progress,
+                model_adapter_label="PracticalRIFEAdapter",
+                mlflow_mode="practical_rife_candidate_validation",
+            )
         except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from exc
@@ -751,6 +1428,91 @@ def evaluate_baseline_command(
     _print_baseline_summary(result)
 
 
+@baseline_app.command("infer-video")
+def baseline_infer_video(
+    config: Path = typer.Option(
+        Path("configs/inference/baseline_2x.yaml"),
+        "--config",
+        help="YAML config with baseline local video inference parameters.",
+    ),
+    input_path: Path | None = typer.Option(
+        None,
+        "--input",
+        help="Override input video path.",
+    ),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Override output video path.",
+    ),
+    baseline_name: str | None = typer.Option(
+        None,
+        "--baseline",
+        help="Baseline method to run: duplicate_left, blend, or farneback.",
+    ),
+    limit_pairs: int | None = typer.Option(
+        None,
+        "--limit-pairs",
+        min=1,
+        help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
+    ),
+    codec: str | None = typer.Option(
+        None,
+        "--codec",
+        help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
+    ),
+    disable_mlflow: bool = typer.Option(
+        False,
+        "--disable-mlflow",
+        help="Skip MLflow logging for a tiny local smoke run.",
+    ),
+) -> None:
+    """Run local 2x video inference with a non-neural baseline."""
+    inference_config = VideoInferenceConfig.from_mapping(
+        _load_yaml_mapping(config),
+        model_config_factory=BaselineAdapterConfig.from_mapping,
+    )
+    inference_config = with_inference_config_path(inference_config, config)
+    inference_config = with_inference_input(inference_config, input_path)
+    inference_config = with_inference_output(inference_config, output_path)
+    inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
+    inference_config = replace(
+        inference_config,
+        model=with_baseline_adapter_name(inference_config.model, baseline_name),
+    )
+    console.print(
+        "[bold]Running baseline video inference:[/bold] "
+        f"{inference_config.model.baseline_name} on {inference_config.input_path}"
+    )
+
+    with _progress() as progress:
+        pairs_task = progress.add_task("Frame pairs", total=None)
+
+        def on_progress(event: str, payload: dict[str, object]) -> None:
+            if event == "start":
+                total = int(payload.get("total") or 0)
+                progress.update(pairs_task, total=total if total > 0 else None)
+            elif event == "encoding_start":
+                _print_inference_encoding_settings(payload)
+            elif event == "pair_advanced":
+                progress.advance(pairs_task)
+
+        try:
+            result = run_video_inference(
+                inference_config,
+                adapter_factory=lambda model_config, _settings: BaselineAdapter(model_config),
+                progress_callback=on_progress,
+                mlflow_mode="baseline_video_inference",
+            )
+        except (MlflowLoggingError, ModelAdapterError, FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+    _print_video_inference_summary(result)
+
+
 @mlflow_app.command("smoke-log")
 def mlflow_smoke_log(
     experiment_name: str = typer.Option(
@@ -780,6 +1542,156 @@ def mlflow_smoke_log(
         raise typer.Exit(code=1) from exc
 
     _print_mlflow_smoke_summary(result)
+
+
+def _inference_targets() -> list[_InferenceTarget]:
+    # Practical-RIFE goes before EMA because both upstream repos use a top-level `model` package name.
+    return [
+        _InferenceTarget(
+            name="practical_rife_v4_25",
+            label="Practical-RIFE v4.25",
+            config_path=Path("configs/inference/practical_rife_v4_25_2x.yaml"),
+            output_group=Path("practical_rife_v4_25"),
+            model_config_factory=PracticalRIFEAdapterConfig.from_mapping,
+            adapter_factory=lambda model_config, settings: PracticalRIFEAdapter(model_config, settings=settings),
+            mlflow_mode="practical_rife_video_inference",
+        ),
+        _InferenceTarget(
+            name="amt_s",
+            label="AMT-S",
+            config_path=Path("configs/inference/amt_s_2x.yaml"),
+            output_group=Path("amt_s"),
+            model_config_factory=AMTAdapterConfig.from_mapping,
+            adapter_factory=lambda model_config, settings: AMTAdapter(model_config, settings=settings),
+            mlflow_mode="amt_video_inference",
+        ),
+        _InferenceTarget(
+            name="ema_vfi_small",
+            label="EMA-VFI-small",
+            config_path=Path("configs/inference/ema_vfi_small_2x.yaml"),
+            output_group=Path("ema_vfi_small"),
+            model_config_factory=EMAVFIAdapterConfig.from_mapping,
+            adapter_factory=lambda model_config, settings: EMAVFIAdapter(model_config, settings=settings),
+            mlflow_mode="ema_video_inference",
+        ),
+        *[
+            _InferenceTarget(
+                name=f"baseline_{baseline_name}",
+                label=f"baseline {baseline_name}",
+                config_path=Path("configs/inference/baseline_2x.yaml"),
+                output_group=Path("baselines") / baseline_name,
+                model_config_factory=BaselineAdapterConfig.from_mapping,
+                adapter_factory=lambda model_config, _settings: BaselineAdapter(model_config),
+                mlflow_mode="baseline_video_inference",
+                baseline_name=baseline_name,
+            )
+            for baseline_name in ("duplicate_left", "blend", "farneback")
+        ],
+    ]
+
+
+def _selected_inference_targets(
+    targets: list[_InferenceTarget],
+    target_selection: list[str] | None,
+) -> list[_InferenceTarget]:
+    selected_names = resolve_batch_target_names(
+        [target.name for target in targets],
+        target_selection,
+        aliases=BATCH_TARGET_ALIASES,
+    )
+    by_name = {target.name: target for target in targets}
+    return [by_name[name] for name in selected_names]
+
+
+def _load_batch_target_config(
+    target: _InferenceTarget,
+    *,
+    limit_pairs: int | None,
+    codec: str | None,
+    disable_mlflow: bool,
+) -> VideoInferenceConfig:
+    inference_config = VideoInferenceConfig.from_mapping(
+        _load_yaml_mapping(target.config_path),
+        model_config_factory=target.model_config_factory,
+    )
+    inference_config = with_inference_config_path(inference_config, target.config_path)
+    inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
+    if target.baseline_name is not None:
+        inference_config = replace(
+            inference_config,
+            model=with_baseline_adapter_name(inference_config.model, target.baseline_name),
+        )
+    return inference_config
+
+
+def _batch_video_config(
+    target_config: VideoInferenceConfig,
+    target: _InferenceTarget,
+    video: BatchInferenceVideo,
+    output_root: Path,
+) -> VideoInferenceConfig:
+    output_extension = target_config.output_path.suffix or ".mp4"
+    output_path = batch_output_path(
+        output_root=output_root,
+        output_group=target.output_group,
+        relative_input_path=video.relative_path,
+        output_extension=output_extension,
+    )
+    return replace(
+        target_config,
+        input_path=video.input_path,
+        output_path=output_path,
+        mlflow=replace(
+            target_config.mlflow,
+            run_name=batch_run_name(target_name=target.name, relative_input_path=video.relative_path),
+        ),
+    )
+
+
+def _write_batch_measurement_files(
+    records: list[_BatchInferenceRecord],
+    targets: list[_InferenceTarget],
+    output_root: Path,
+) -> list[Path]:
+    paths: list[Path] = []
+    for target in targets:
+        target_records = [record for record in records if record.target_name == target.name]
+        if not target_records:
+            continue
+        path = batch_measurements_path(output_root=output_root, output_group=target.output_group)
+        write_batch_measurements_csv(path, [_batch_measurement_row(record) for record in target_records])
+        paths.append(path)
+    return paths
+
+
+def _batch_measurement_row(record: _BatchInferenceRecord) -> dict[str, object]:
+    return {
+        "target_name": record.target_name,
+        "input_video": record.input_video,
+        "relative_input_video": record.relative_input_video,
+        "output_video": record.output_video,
+        "status": record.status,
+        "pairs_processed": record.pairs_processed,
+        "frames_written": record.frames_written,
+        "input_fps": _optional_float(record.input_fps),
+        "output_fps": _optional_float(record.output_fps),
+        "model_inference_elapsed_sec": _optional_float(record.model_inference_elapsed_sec),
+        "total_elapsed_sec": _optional_float(record.total_elapsed_sec),
+        "model_pairs_per_sec": _optional_float(record.model_pairs_per_sec),
+        "total_pairs_per_sec": _optional_float(record.total_pairs_per_sec),
+        "audio_streams_available": record.audio_streams_available,
+        "audio_streams_preserved": record.audio_streams_preserved,
+        "mlflow_run_id": record.mlflow_run_id,
+        "error": record.error,
+    }
+
+
+def _optional_float(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return f"{value:.8f}"
 
 
 def _print_index_summary(result: SourceIndexResult) -> None:
@@ -900,6 +1812,47 @@ def _print_mlflow_smoke_summary(result: MlflowSmokeResult) -> None:
     console.print(table)
 
 
+def _print_batch_inference_summary(records: list[_BatchInferenceRecord], measurement_paths: list[Path]) -> None:
+    ok_count = sum(1 for record in records if record.status == "ok")
+    failed_count = len(records) - ok_count
+    table = Table(title="Batch Inference Summary")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("jobs total", str(len(records)))
+    table.add_row("jobs completed", str(ok_count))
+    table.add_row("jobs failed", str(failed_count))
+    console.print(table)
+
+    detail = Table(title="Batch Inference Outputs")
+    detail.add_column("target")
+    detail.add_column("input")
+    detail.add_column("status")
+    detail.add_column("output")
+    detail.add_column("pairs")
+    detail.add_column("elapsed")
+    detail.add_column("mlflow")
+    detail.add_column("error")
+    for record in records:
+        detail.add_row(
+            record.target_name,
+            str(record.input_video),
+            record.status,
+            "" if record.output_video is None else str(record.output_video),
+            "" if record.pairs_processed is None else str(record.pairs_processed),
+            "" if record.total_elapsed_sec is None else f"{record.total_elapsed_sec:.3f}s",
+            record.mlflow_run_id or "",
+            (record.error or "")[:120],
+        )
+    console.print(detail)
+
+    if measurement_paths:
+        measurements = Table(title="Batch Measurement CSVs")
+        measurements.add_column("Path")
+        for path in measurement_paths:
+            measurements.add_row(str(path))
+        console.print(measurements)
+
+
 def _print_adapter_environment_report(title: str, report: AdapterEnvironmentReport) -> None:
     table = Table(title=f"{title}: {report.status}")
     table.add_column("Check")
@@ -911,16 +1864,44 @@ def _print_adapter_environment_report(title: str, report: AdapterEnvironmentRepo
 
 
 def _print_video_inference_summary(result: VideoInferenceResult) -> None:
-    table = Table(title="EMA Video Inference Summary")
+    table = Table(title="Video Inference Summary")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("input video", str(result.input_path))
     table.add_row("output video", str(result.output_path))
     table.add_row("input fps", f"{result.input_fps:.4f}")
     table.add_row("output fps", f"{result.output_fps:.4f}")
+    table.add_row("codec", result.codec)
+    table.add_row("container", result.container or "inferred")
+    table.add_row("pixel format", result.pix_fmt)
+    table.add_row("frame format", result.frame_format)
+    table.add_row("audio streams", f"{result.audio_streams_preserved}/{result.audio_streams_available} preserved")
     table.add_row("pairs processed", str(result.pairs_processed))
     table.add_row("frames written", str(result.frames_written))
+    table.add_row("model inference time", f"{result.model_inference_elapsed_sec:.3f}s")
+    table.add_row("total elapsed time", f"{result.total_elapsed_sec:.3f}s")
+    table.add_row("model pairs/sec", f"{result.model_pairs_per_sec:.4f}")
+    table.add_row("total pairs/sec", f"{result.total_pairs_per_sec:.4f}")
     table.add_row("mlflow run id", result.mlflow_run_id or "not logged")
+    console.print(table)
+
+
+def _print_inference_encoding_settings(payload: dict[str, object]) -> None:
+    table = Table(title="PyAV Encoding Settings")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("output path", str(payload["output_path"]))
+    table.add_row("container", str(payload["container"]))
+    table.add_row("codec", str(payload["codec"]))
+    table.add_row("output fps", f"{float(payload['output_fps']):.4f}")
+    table.add_row("frame size", f"{payload['width']}x{payload['height']}")
+    table.add_row("pixel format", str(payload["pix_fmt"]))
+    table.add_row("frame format", str(payload["frame_format"]))
+    table.add_row("encoder options", str(payload["encoder_options"]))
+    table.add_row(
+        "audio streams",
+        f"{payload['audio_streams_to_preserve']}/{payload['audio_streams_available']} to preserve",
+    )
     console.print(table)
 
 
@@ -1008,6 +1989,8 @@ app.add_typer(data_app, name="data")
 app.add_typer(baseline_app, name="baseline")
 app.add_typer(mlflow_app, name="mlflow")
 app.add_typer(ema_app, name="ema")
+app.add_typer(amt_app, name="amt")
+app.add_typer(rife_app, name="rife")
 
 
 def main() -> None:

@@ -1,0 +1,30 @@
+candidate_id: practical_rife_v4_25_candidate
+dataset_version_id: stage1_default
+test_manifest_path: dataset_versions/stage1_default/test_all.csv
+output_dir: outputs/candidate_validation/practical_rife_v4_25/stage1_default
+model:
+  model_name: practical_rife_v4_25
+  repo_name: Practical-RIFE
+  checkpoint_path: Practical-RIFE/RIFEv4.25/train_log
+  device: cuda
+  timestep: 0.5
+  scale: 1.0
+  divisor: 128
+  strict_checkpoint: false
+thresholds:
+  min_psnr_mean: 25.0
+  min_ssim_mean: 0.80
+  max_lpips_mean: null
+limit_samples: null
+compute_lpips: true
+lpips_device: cpu
+lpips_net: alex
+save_predictions: true
+prediction_limit: 16
+mlflow:
+  enabled: true
+  experiment_name: stage1-rife-validation
+  run_name: practical_rife_v4_25_candidate_stage1_default
+  tags:
+    stage: stage1
+    workflow: practical_rife_candidate_validation

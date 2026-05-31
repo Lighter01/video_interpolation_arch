@@ -23,6 +23,7 @@ from video_interpolation.mlflow import MlflowRunConfig, log_stage1_run
 from video_interpolation.settings import Settings, load_settings
 
 ProgressCallback = Callable[[str, Mapping[str, object]], None]
+AdapterFactory = Callable[[Any, Settings], ModelAdapter]
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class CandidateValidationConfig:
     dataset_version_id: str
     test_manifest_path: Path
     output_dir: Path = Path("outputs/candidate_validation/ema_vfi_small")
-    model: EMAVFIAdapterConfig = field(default_factory=EMAVFIAdapterConfig)
+    model: Any = field(default_factory=EMAVFIAdapterConfig)
     thresholds: ValidationThresholds = field(default_factory=ValidationThresholds)
     limit_samples: int | None = None
     compute_lpips: bool = True
@@ -54,12 +55,16 @@ class CandidateValidationConfig:
     config_path: Path | None = None
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "CandidateValidationConfig":
+    def from_mapping(
+        cls,
+        data: Mapping[str, Any],
+        model_config_factory: Callable[[Mapping[str, Any] | None], Any] = EMAVFIAdapterConfig.from_mapping,
+    ) -> "CandidateValidationConfig":
         values = dict(data)
         values["test_manifest_path"] = Path(values["test_manifest_path"])
         if "output_dir" in values:
             values["output_dir"] = Path(values["output_dir"])
-        values["model"] = EMAVFIAdapterConfig.from_mapping(values.get("model"))
+        values["model"] = model_config_factory(values.get("model"))
         values["thresholds"] = ValidationThresholds.from_mapping(values.get("thresholds"))
         values["mlflow"] = MlflowRunConfig.from_mapping(values.get("mlflow"))
         if values.get("config_path") is not None:
@@ -92,6 +97,27 @@ def validate_candidate(
     adapter: ModelAdapter | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> CandidateValidationResult:
+    return validate_candidate_with_adapter(
+        config,
+        adapter_factory=lambda model_config, run_settings: EMAVFIAdapter(model_config, settings=run_settings),
+        settings=settings,
+        adapter=adapter,
+        progress_callback=progress_callback,
+        model_adapter_label="EMAVFIAdapter",
+        mlflow_mode="candidate_validation",
+    )
+
+
+def validate_candidate_with_adapter(
+    config: CandidateValidationConfig,
+    *,
+    adapter_factory: AdapterFactory,
+    settings: Settings | None = None,
+    adapter: ModelAdapter | None = None,
+    progress_callback: ProgressCallback | None = None,
+    model_adapter_label: str = "ModelAdapter",
+    mlflow_mode: str = "candidate_validation",
+) -> CandidateValidationResult:
     config.validate()
     settings = settings or load_settings()
     manifest_path = _resolve_project_path(settings, config.test_manifest_path)
@@ -103,7 +129,7 @@ def validate_candidate(
     _emit_progress(progress_callback, "start", total=sample_count)
 
     owns_adapter = adapter is None
-    model_adapter = adapter or EMAVFIAdapter(config.model, settings=settings)
+    model_adapter = adapter or adapter_factory(config.model, settings)
     lpips_evaluator: LPIPSEvaluator | None = None
     if config.compute_lpips:
         lpips_evaluator = LPIPSEvaluator(device=config.lpips_device, net=config.lpips_net)
@@ -162,9 +188,9 @@ def validate_candidate(
     approved, reasons = decide_candidate(aggregate_metrics, config.thresholds)
     report = {
         "candidate_id": config.candidate_id,
-        "model_name": config.model.model_name,
-        "model_adapter": "EMAVFIAdapter",
-        "checkpoint": str(config.model.checkpoint_path),
+        "model_name": _model_config_value(config.model, "model_name"),
+        "model_adapter": model_adapter_label,
+        "checkpoint": str(_model_config_value(config.model, "checkpoint_path")),
         "dataset_version_id": config.dataset_version_id,
         "test_manifest_path": str(config.test_manifest_path),
         "validation_thresholds": {
@@ -205,10 +231,10 @@ def validate_candidate(
     mlflow_run_id = log_stage1_run(
         config.mlflow,
         params={
-            "mode": "candidate_validation",
+            "mode": mlflow_mode,
             "candidate_id": config.candidate_id,
-            "model_name": config.model.model_name,
-            "checkpoint_path": str(config.model.checkpoint_path),
+            "model_name": _model_config_value(config.model, "model_name"),
+            "checkpoint_path": str(_model_config_value(config.model, "checkpoint_path")),
             "dataset_version_id": config.dataset_version_id,
             "test_manifest_path": str(config.test_manifest_path),
             "limit_samples": config.limit_samples,
@@ -347,6 +373,12 @@ def _resolve_project_path(settings: Settings, path: Path) -> Path:
     if path.is_absolute():
         return path
     return settings.resolve_path(path)
+
+
+def _model_config_value(model_config: Any, name: str) -> Any:
+    if isinstance(model_config, Mapping):
+        return model_config.get(name, "")
+    return getattr(model_config, name, "")
 
 
 def _emit_progress(

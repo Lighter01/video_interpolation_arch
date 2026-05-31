@@ -34,7 +34,11 @@ Agent-facing documentation and development logs.
 
 ### `.agent/docs/exec-plans/active/`
 
-- `01_ml_core_selected.execplan.md` — selected active ExecPlan for Stage 1 ML Core.
+- No active ExecPlan. Stage 2 planning should create `02_inference_runtime_refactor.execplan.md` here only after analysis is accepted and clarification questions are answered.
+
+### `.agent/docs/exec-plans/completed/`
+
+- `01_ml_core_selected.execplan.md` — completed Stage 1 ML Core ExecPlan and handoff.
 
 ## `.agent/stage_plans/`
 
@@ -164,26 +168,32 @@ Pretrained Practical-RIFE weights and accompanying model files.
 
 Local Stage 1 Python package.
 
-- `adapters/` — shared model adapter interface and EMA-VFI-small adapter.
-- `baselines.py` — duplication, blending, and Farneback baseline evaluation over triplet manifests.
-- `cli.py` — Typer developer CLI with settings display, EMA-VFI-small preflight/adapter/inference/training/validation commands, data workflows, triplet manifest inspection, baseline evaluation, and MLflow smoke logging.
+- `adapters/` — shared model adapter interface plus EMA-VFI-small, AMT-S, Practical-RIFE, and non-neural baseline adapters.
+- `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, output path layout, MLflow run naming, and per-target measurement CSV export.
+- `baselines.py` — duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
+- `amt_preflight.py` — lightweight AMT-S import/model/checkpoint compatibility check.
+- `cli.py` — Typer developer CLI with settings display, directory-wide all-target inference, EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
 - `contracts.py` — compact artifact contracts and relative-path validation helpers.
 - `data/` — source preprocessing and source-level indexing code.
 - `ema_preflight.py` — lightweight EMA-VFI-small import/checkpoint compatibility check.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
-- `inference.py` — local EMA-VFI-small 2x video inference workflow.
+- `inference.py` — shared local 2x video inference workflow with PyAV/FFmpeg output encoding, audio remuxing, and EMA/AMT/Practical-RIFE adapter entrypoints.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
 - `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs.
+- `rife_preflight.py` — lightweight Practical-RIFE import/model/checkpoint compatibility check.
 - `settings.py` — `pydantic-settings` runtime settings loaded from `.env`.
 - `training.py` — EMA-VFI-small fine-tuning and eval-only runner over triplet manifests.
-- `validation.py` — EMA-VFI-small candidate validation metrics, reports, prediction samples, and threshold decisions.
+- `validation.py` — shared candidate validation metrics, reports, prediction samples, and threshold decisions for model adapters.
 
 ### `src/video_interpolation/adapters/`
 
 Stage 1 model adapter implementations.
 
 - `base.py` — common adapter interface and environment-report structures.
+- `amt.py` — AMT-S adapter using `model_repos/AMT`, upstream `cfgs/AMT-S.yaml`, and `model_weights/AMT/amt-s.pth`.
+- `baseline.py` — ModelAdapter-compatible wrapper for duplicate-left, blend, and Farneback baseline methods.
 - `ema_vfi.py` — EMA-VFI-small adapter using `model_repos/EMA-VFI` and explicit local checkpoints.
+- `rife.py` — Practical-RIFE adapter using `model_repos/Practical-RIFE` and `model_weights/Practical-RIFE/RIFEv4.25/train_log`.
 
 ### `src/video_interpolation/data/`
 
@@ -207,14 +217,21 @@ Stage 1 YAML config layout and implemented workflow configs.
 - `data/index_vimeo_triplet.yaml` — parameters for existing Vimeo triplet source indexing.
 - `data/preprocess_anime.yaml` — parameters for anime raw-video preprocessing.
 - `data/preprocess_test.yaml` — small-video preprocessing config for diagnostics and smoke tests.
-- `inference/README.md` — operational field reference for local EMA inference config.
+- `inference/README.md` — operational field reference for local EMA, AMT, and Practical-RIFE inference configs.
+- `inference/amt_s_2x.yaml` — parameters for local AMT-S 2x video inference.
+- `inference/baseline_2x.yaml` — parameters for local baseline 2x video inference.
 - `inference/ema_vfi_small_2x.yaml` — parameters for local EMA-VFI-small 2x video inference.
+- `inference/practical_rife_v4_25_2x.yaml` — parameters for local Practical-RIFE v4.25 2x video inference.
 - `models/README.md` — operational field reference for model adapter configs.
+- `models/amt_s.yaml` — AMT-S adapter/checkpoint/device/config settings.
 - `models/ema_vfi_small.yaml` — EMA-VFI-small adapter/checkpoint/device config.
+- `models/practical_rife_v4_25.yaml` — Practical-RIFE v4.25 adapter/checkpoint/device config.
 - `training/README.md` — operational field reference for EMA fine-tuning config.
 - `training/ema_vfi_small_finetune.yaml` — EMA-VFI-small fine-tuning and eval-only runner config.
-- `validation/README.md` — operational field reference for EMA candidate validation config.
+- `validation/README.md` — operational field reference for EMA, AMT, and Practical-RIFE candidate validation configs.
+- `validation/amt_s_candidate.yaml` — AMT-S candidate/eval-only validation thresholds and outputs config.
 - `validation/ema_vfi_small_candidate.yaml` — EMA-VFI-small candidate validation thresholds and outputs config.
+- `validation/practical_rife_v4_25_candidate.yaml` — Practical-RIFE v4.25 candidate/eval-only validation thresholds and outputs config.
 
 ## `infra/`
 
@@ -239,8 +256,11 @@ Human-facing project documentation.
 Focused behavior tests.
 
 - `test_contracts.py` — compact artifact contract and relative path validation tests.
+- `test_amt_adapter.py` — AMT adapter prediction and shared config parsing tests.
 - `test_datasets_metrics_baselines.py` — triplet dataset loading, metric sanity, and baseline evaluation smoke tests.
 - `test_indexing.py` — Vimeo source-index generation tests.
+- `test_inference.py` — local inference config resolution and PyAV writer smoke tests.
 - `test_preprocessing.py` — scene-safe sampling, quota termination, frame-step validation, and static-triplet filtering tests.
+- `test_rife_adapter.py` — Practical-RIFE adapter prediction, padding, checkpoint normalization, and shared config parsing tests.
 - `test_validation_and_adapters.py` — candidate validation decision logic and prediction artifact smoke tests with a fake adapter.
 - `test_versioning.py` — global index and dataset-version split/manifest generation tests.

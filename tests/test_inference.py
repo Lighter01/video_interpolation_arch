@@ -1,0 +1,268 @@
+from pathlib import Path
+
+import av
+import numpy as np
+import pytest
+import torch
+
+from video_interpolation.adapters.base import ModelAdapter
+from video_interpolation.adapters.baseline import BaselineAdapter, BaselineAdapterConfig
+from video_interpolation.batch_inference import (
+    batch_measurements_path,
+    batch_output_path,
+    batch_run_name,
+    discover_inference_videos,
+    resolve_batch_target_names,
+    write_batch_measurements_csv,
+)
+from video_interpolation.inference import (
+    VideoInferenceConfig,
+    resolve_encoder_options,
+    run_ema_video_inference,
+    run_video_inference,
+)
+from video_interpolation.mlflow import MlflowRunConfig
+from video_interpolation.settings import Settings
+
+
+def test_video_inference_config_parses_pyav_output_fields() -> None:
+    config = VideoInferenceConfig.from_mapping(
+        {
+            "input_path": "raw_data/tmp_test/Dora.mp4",
+            "output_path": "outputs/inference/test.mp4",
+            "codec": "libx264",
+            "container": "mp4",
+            "pix_fmt": "yuv420p",
+            "frame_format": "rgb24",
+            "encoder_options_by_codec": {"libx264": {"preset": "slow"}},
+            "encoder_options": {"crf": "21"},
+            "mlflow": {"enabled": False},
+        }
+    )
+
+    config.validate()
+    assert config.codec == "libx264"
+    assert config.container == "mp4"
+    assert config.encoder_options_by_codec["libx264"]["preset"] == "slow"
+    assert config.encoder_options["crf"] == "21"
+
+
+def test_encoder_option_resolution_uses_codec_specific_defaults_without_leaking_options() -> None:
+    nvenc_options = resolve_encoder_options("h264_nvenc", 60.0)
+    libx_options = resolve_encoder_options("libx264", 60.0)
+
+    assert nvenc_options["rc"] == "vbr"
+    assert nvenc_options["cq"] == "23"
+    assert "crf" not in nvenc_options
+    assert libx_options["crf"] == "22"
+    assert "rc" not in libx_options
+    assert "cq" not in libx_options
+
+
+def test_encoder_option_resolution_applies_per_codec_and_top_level_overrides() -> None:
+    options = resolve_encoder_options(
+        "libx264",
+        59.94,
+        encoder_options={"crf": 20},
+        encoder_options_by_codec={"libx264": {"preset": "slow"}},
+    )
+
+    assert options["preset"] == "slow"
+    assert options["crf"] == "20"
+    assert options["bf"] == "0"
+    assert options["g"] == "119"
+
+
+def test_mp4v_is_rejected_as_legacy_opencv_fourcc() -> None:
+    with pytest.raises(ValueError, match="mp4v"):
+        resolve_encoder_options("mp4v", 60.0)
+
+    config = VideoInferenceConfig(input_path=Path("in.mp4"), output_path=Path("out.mp4"), codec="mp4v")
+    with pytest.raises(ValueError, match="mp4v"):
+        config.validate()
+
+
+def test_pyav_inference_writer_writes_readable_video_and_preserves_audio(tmp_path) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "output.mp4"
+    _write_synthetic_input_video(input_path)
+
+    result = run_ema_video_inference(
+        VideoInferenceConfig(
+            input_path=input_path,
+            output_path=output_path,
+            codec="libx264",
+            encoder_options={"crf": "28"},
+            limit_pairs=1,
+            mlflow=MlflowRunConfig(enabled=False),
+        ),
+        settings=Settings(),
+        adapter=_BlendAdapter(),
+    )
+
+    assert result.frames_written == 3
+    assert result.pairs_processed == 1
+    assert result.audio_streams_available == 1
+    assert result.audio_streams_preserved == 1
+    assert output_path.is_file()
+
+    with av.open(str(output_path)) as container:
+        assert len(container.streams.video) == 1
+        assert len(container.streams.audio) == 1
+        assert len(list(container.decode(video=0))) == 3
+
+
+def test_baseline_adapter_reuses_video_inference_workflow(tmp_path) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "baseline_output.mp4"
+    _write_synthetic_input_video(input_path)
+
+    result = run_video_inference(
+        VideoInferenceConfig(
+            input_path=input_path,
+            output_path=output_path,
+            model=BaselineAdapterConfig(model_name="baseline_blend", baseline_name="blend"),
+            codec="libx264",
+            encoder_options={"crf": "28"},
+            limit_pairs=1,
+            mlflow=MlflowRunConfig(enabled=False),
+        ),
+        adapter_factory=lambda model_config, _settings: BaselineAdapter(model_config),
+    )
+
+    assert result.pairs_processed == 1
+    assert result.frames_written == 3
+    assert result.audio_streams_preserved == 1
+    assert output_path.is_file()
+
+    with av.open(str(output_path)) as container:
+        assert len(list(container.decode(video=0))) == 3
+
+
+def test_batch_inference_discovers_videos_and_preserves_relative_output_layout(tmp_path) -> None:
+    input_dir = tmp_path / "inputs"
+    nested_dir = input_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    (input_dir / "a.mp4").write_bytes(b"video")
+    (nested_dir / "b.mkv").write_bytes(b"video")
+    (nested_dir / "notes.txt").write_text("ignore", encoding="utf-8")
+
+    videos = discover_inference_videos(input_dir)
+
+    assert [video.relative_path.as_posix() for video in videos] == ["a.mp4", "nested/b.mkv"]
+    assert batch_output_path(
+        output_root=tmp_path / "outputs",
+        output_group=Path("baselines") / "blend",
+        relative_input_path=videos[1].relative_path,
+        output_extension=".mp4",
+    ) == tmp_path / "outputs" / "baselines" / "blend" / "nested" / "b_2x.mp4"
+    assert batch_run_name(target_name="baseline_blend", relative_input_path=videos[1].relative_path) == (
+        "baseline_blend_nested_b_2x"
+    )
+
+    measurements_path = batch_measurements_path(
+        output_root=tmp_path / "outputs",
+        output_group=Path("baselines") / "blend",
+    )
+    write_batch_measurements_csv(
+        measurements_path,
+        [
+            {
+                "target_name": "baseline_blend",
+                "relative_input_video": "nested/b.mkv",
+                "output_video": "outputs/baselines/blend/nested/b_2x.mp4",
+                "status": "ok",
+                "pairs_processed": 1,
+                "model_inference_elapsed_sec": "0.10000000",
+                "total_elapsed_sec": "0.20000000",
+            }
+        ],
+    )
+
+    csv_text = measurements_path.read_text(encoding="utf-8")
+    assert "model_inference_elapsed_sec" in csv_text
+    assert "baseline_blend" in csv_text
+    assert "nested/b.mkv" in csv_text
+
+
+def test_batch_target_selection_supports_aliases_and_groups() -> None:
+    available = (
+        "practical_rife_v4_25",
+        "amt_s",
+        "ema_vfi_small",
+        "baseline_duplicate_left",
+        "baseline_blend",
+        "baseline_farneback",
+    )
+    aliases = {
+        "models": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
+        "ema": ("ema_vfi_small",),
+        "blend": ("baseline_blend",),
+    }
+
+    assert resolve_batch_target_names(available, ["ema", "blend"], aliases=aliases) == [
+        "ema_vfi_small",
+        "baseline_blend",
+    ]
+    assert resolve_batch_target_names(available, ["models"], aliases=aliases) == [
+        "practical_rife_v4_25",
+        "amt_s",
+        "ema_vfi_small",
+    ]
+
+    with pytest.raises(ValueError, match="Unknown target"):
+        resolve_batch_target_names(available, ["unknown"], aliases=aliases)
+
+
+class _BlendAdapter(ModelAdapter):
+    model_name = "blend_adapter"
+
+    def validate_environment(self):  # pragma: no cover - not used by this focused test.
+        raise NotImplementedError
+
+    def build_model(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def load_checkpoint(self, checkpoint_path: Path | None = None) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def save_checkpoint(self, checkpoint_path: Path) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def train(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def eval(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def predict_pair(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        return torch.clamp((left + right) / 2.0, 0.0, 1.0)
+
+
+def _write_synthetic_input_video(path: Path) -> None:
+    with av.open(str(path), mode="w") as container:
+        video_stream = container.add_stream("libx264", rate=24)
+        video_stream.width = 64
+        video_stream.height = 64
+        video_stream.pix_fmt = "yuv420p"
+        audio_stream = container.add_stream("aac", rate=48_000)
+        audio_stream.layout = "mono"
+
+        for offset in (32, 96):
+            frame = av.VideoFrame.from_ndarray(_solid_rgb_frame(offset), format="rgb24")
+            for packet in video_stream.encode(frame):
+                container.mux(packet)
+        for packet in video_stream.encode():
+            container.mux(packet)
+
+        samples = (np.sin(2 * np.pi * 440 * np.arange(4_800) / 48_000) * 1000).astype(np.int16)
+        audio_frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
+        audio_frame.sample_rate = 48_000
+        for packet in audio_stream.encode(audio_frame):
+            container.mux(packet)
+        for packet in audio_stream.encode():
+            container.mux(packet)
+
+
+def _solid_rgb_frame(value: int) -> np.ndarray:
+    return np.full((64, 64, 3), value, dtype=np.uint8)

@@ -1,0 +1,28 @@
+{
+  "candidate_id": "practical_rife_v4_25_candidate",
+  "model_name": "practical_rife_v4_25",
+  "model_adapter": "PracticalRIFEAdapter",
+  "checkpoint": "Practical-RIFE/RIFEv4.25/train_log",
+  "dataset_version_id": "stage1_default",
+  "test_manifest_path": "dataset_versions/stage1_default/test_all.csv",
+  "validation_thresholds": {
+    "min_psnr_mean": 25.0,
+    "min_ssim_mean": 0.8,
+    "max_lpips_mean": null
+  },
+  "aggregate_metrics": {
+    "psnr_mean": 33.72333412,
+    "ssim_mean": 0.94872203,
+    "lpips_mean": 0.01886579
+  },
+  "approval_decision": "approved",
+  "decision_reasons": [
+    "all configured thresholds passed"
+  ],
+  "artifact_paths": {
+    "metrics_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/practical_rife_v4_25/stage1_default/metrics.csv",
+    "metrics_summary_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/practical_rife_v4_25/stage1_default/metrics_summary.csv",
+    "sample_predictions": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/practical_rife_v4_25/stage1_default/sample_predictions"
+  },
+  "created_at": "2026-05-27T08:44:21.286579+00:00"
+}

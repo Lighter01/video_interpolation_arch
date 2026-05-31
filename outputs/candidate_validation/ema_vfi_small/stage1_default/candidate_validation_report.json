@@ -1,0 +1,28 @@
+{
+  "candidate_id": "ema_vfi_small_candidate",
+  "model_name": "ema_vfi_small",
+  "model_adapter": "EMAVFIAdapter",
+  "checkpoint": "EMA-VFI/ours_small.pkl",
+  "dataset_version_id": "stage1_default",
+  "test_manifest_path": "dataset_versions/stage1_default/test_all.csv",
+  "validation_thresholds": {
+    "min_psnr_mean": 25.0,
+    "min_ssim_mean": 0.8,
+    "max_lpips_mean": null
+  },
+  "aggregate_metrics": {
+    "psnr_mean": 37.22077199,
+    "ssim_mean": 0.97305639,
+    "lpips_mean": 0.01958657
+  },
+  "approval_decision": "approved",
+  "decision_reasons": [
+    "all configured thresholds passed"
+  ],
+  "artifact_paths": {
+    "metrics_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/ema_vfi_small/stage1_default/metrics.csv",
+    "metrics_summary_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/ema_vfi_small/stage1_default/metrics_summary.csv",
+    "sample_predictions": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/ema_vfi_small/stage1_default/sample_predictions"
+  },
+  "created_at": "2026-05-27T08:01:03.510972+00:00"
+}

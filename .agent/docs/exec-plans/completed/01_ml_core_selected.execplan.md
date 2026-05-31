@@ -1,9 +1,9 @@
 # Title and Metadata
 
 - Stage: Stage 1 - ML Core
-- Status: Selected Stage 1 ExecPlan - Milestone 7 implemented
+- Status: Completed / closed for Stage 2 handoff
 - Created: 2026-05-22
-- Updated: 2026-05-27
+- Updated: 2026-05-31
 - Stage plan: `.agent/stage_plans/01_ml_core_stage_plan.md`
 - Global plan: `.agent/general_plan.md`
 - Prior ExecPlan: None found in `.agent/docs/exec-plans/completed/`
@@ -61,7 +61,7 @@ The obsolete option A/B/C draft files were removed from `.agent/docs/exec-plans/
 
 Repository root: `/home/lighter_01/projects/itmo/ai_architecture/video_interpolation`.
 
-Current project code after Milestone 5:
+Current project code after Milestone 9:
 
 - `main.py` only prints a hello message.
 - `README.md` is empty.
@@ -69,18 +69,21 @@ Current project code after Milestone 5:
 - `pyproject.toml` exists with Python `>=3.13`, modern Torch/torchvision, OpenCV, Pillow, numpy, pandas, pydantic, `pydantic-settings`, Typer, Rich, SQLAlchemy, MinIO, MLflow, PyAV, PySceneDetect, scikit-image, LPIPS, timm, OmegaConf, imageio, pytest, ruff, and setuptools package discovery for `src/`.
 - `uv.lock` exists and was updated for the Milestone 1 dependency baseline.
 - `.env.example` exists with `DATASET_ROOT`, `MODEL_REPOS_ROOT`, `MODEL_WEIGHTS_ROOT`, and `MLFLOW_TRACKING_URI`.
-- `src/video_interpolation/` exists with settings, compact artifact contracts, CLI, EMA-VFI-small preflight utility, source data modules, global indexing, dataset versioning, triplet dataset loading, metrics, baseline evaluation, MLflow logging helpers, EMA model adapter, local EMA inference workflow, EMA fine-tuning runner, and EMA candidate validation workflow.
+- `src/video_interpolation/` exists with settings, compact artifact contracts, CLI, EMA-VFI-small, AMT-S, and Practical-RIFE preflight utilities, source data modules, global indexing, dataset versioning, triplet dataset loading, metrics, baseline evaluation/video inference, MLflow logging helpers, EMA/AMT/Practical-RIFE/baseline model adapters, shared local inference workflow, EMA fine-tuning runner, and shared candidate validation workflow.
 - `src/video_interpolation/data/preprocessing.py` supports raw-video discovery, scene-safe sequence sampling, static-triplet filtering, PyAV frame extraction, PNG writing, and source-level `sequence_index.csv` output.
 - `src/video_interpolation/data/indexing.py` supports source-level indexing for existing Vimeo triplets without copying frames and global sequence-index construction from source indexes.
 - `src/video_interpolation/data/versioning.py` supports manifest-only dataset version construction with source-video-level splitting, triplet extraction policies, relative manifest paths, and lightweight train-pool mixing.
 - `src/video_interpolation/data/datasets.py` implements `UniversalTripletDataset` over triplet manifests, resolving frame paths from `DATASET_ROOT` and applying synchronized transforms to left/middle/right frames.
 - `src/video_interpolation/metrics.py` implements PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
-- `src/video_interpolation/baselines.py` implements duplication, blending, and Farneback baseline evaluation over triplet manifests.
+- `src/video_interpolation/baselines.py` implements duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
+- `src/video_interpolation/batch_inference.py` implements shared helpers for directory-wide inference video discovery, target selection, output path layout, per-run MLflow names, and per-target timing measurement CSVs.
 - `src/video_interpolation/adapters/base.py` defines the shared Stage 1 model adapter interface and environment-report structures.
 - `src/video_interpolation/adapters/ema_vfi.py` implements the EMA-VFI-small adapter, explicit checkpoint loading from `MODEL_WEIGHTS_ROOT/EMA-VFI/ours_small.pkl`, sequential pair/batch prediction, training/eval helpers, checkpoint save/reload support, and GPU cleanup.
-- `src/video_interpolation/inference.py` implements local EMA-VFI-small 2x video inference by interleaving original and generated frames.
+- `src/video_interpolation/adapters/amt.py` implements the AMT-S adapter, explicit upstream config loading from `model_repos/AMT/cfgs/AMT-S.yaml`, checkpoint loading from `MODEL_WEIGHTS_ROOT/AMT/amt-s.pth`, safe PyTorch weights loading, sequential pair/batch prediction, and GPU cleanup.
+- `src/video_interpolation/adapters/rife.py` implements the Practical-RIFE v4.25 adapter, explicit selected `train_log` loading from `MODEL_WEIGHTS_ROOT/Practical-RIFE/RIFEv4.25/train_log`, safe PyTorch weights loading, sequential pair/batch prediction, and GPU cleanup.
+- `src/video_interpolation/inference.py` implements shared local 2x video inference by interleaving original and generated frames, encoding with PyAV/FFmpeg, and remuxing compatible audio streams.
 - `src/video_interpolation/training.py` implements EMA-VFI-small fine-tuning and eval-only runner support over `train_all.csv` and `val_all.csv`.
-- `src/video_interpolation/validation.py` implements EMA-VFI-small candidate validation over `test_all.csv`, metrics/report writing, triplet-style sample predictions, and threshold decisions.
+- `src/video_interpolation/validation.py` implements shared candidate validation over `test_all.csv`, metrics/report writing, triplet-style sample predictions, and threshold decisions for EMA/AMT adapters.
 - `src/video_interpolation/image_io.py` provides shared tensor/image conversion and triplet-style prediction sample writing.
 - `src/video_interpolation/mlflow.py` implements MLflow configuration, bounded connectivity behavior, baseline/generic logging helpers, and a smoke-log helper.
 - `tests/test_contracts.py`, `tests/test_preprocessing.py`, `tests/test_indexing.py`, and `tests/test_versioning.py` exist for focused compact-contract, sampler/filtering, source-index, global-index, and dataset-version validation.
@@ -88,14 +91,15 @@ Current project code after Milestone 5:
 - `tests/test_validation_and_adapters.py` exists for candidate validation threshold decisions and triplet-style prediction artifact behavior using a fake adapter.
 - `configs/README.md` describes the Stage 1 YAML config layout.
 - `configs/data/index_vimeo_triplet.yaml`, `configs/data/preprocess_anime.yaml`, `configs/data/preprocess_test.yaml`, `configs/data/global_index.yaml`, and `configs/data/dataset_version.yaml` exist for implemented data workflows.
-- `configs/baselines/baseline_eval.yaml` and `configs/baselines/README.md` exist for baseline evaluation configuration and operations.
-- `configs/models/ema_vfi_small.yaml` and `configs/models/README.md` exist for EMA-VFI-small adapter configuration.
-- `configs/inference/ema_vfi_small_2x.yaml` and `configs/inference/README.md` exist for local EMA 2x video inference.
+- `configs/baselines/baseline_eval.yaml` and `configs/baselines/README.md` exist for baseline evaluation configuration and operations; `configs/inference/baseline_2x.yaml` exists for local baseline video inference.
+- `configs/models/ema_vfi_small.yaml`, `configs/models/amt_s.yaml`, `configs/models/practical_rife_v4_25.yaml`, and `configs/models/README.md` exist for EMA-VFI-small, AMT-S, and Practical-RIFE adapter configuration.
+- `configs/inference/ema_vfi_small_2x.yaml`, `configs/inference/amt_s_2x.yaml`, `configs/inference/practical_rife_v4_25_2x.yaml`, and `configs/inference/README.md` exist for local EMA/AMT/Practical-RIFE 2x video inference.
 - `configs/training/ema_vfi_small_finetune.yaml` and `configs/training/README.md` exist for EMA fine-tuning and eval-only runs.
-- `configs/validation/ema_vfi_small_candidate.yaml` and `configs/validation/README.md` exist for EMA candidate validation.
+- `configs/validation/ema_vfi_small_candidate.yaml`, `configs/validation/amt_s_candidate.yaml`, `configs/validation/practical_rife_v4_25_candidate.yaml`, and `configs/validation/README.md` exist for EMA, AMT, and Practical-RIFE candidate validation.
 - `infra/mlflow/docker-compose.yml`, `infra/mlflow/Dockerfile`, and `infra/mlflow/README.md` exist for local MLflow/PostgreSQL/MinIO infrastructure.
-- `docs/stage1_ml_core.md` documents current Milestone 1 through Milestone 7 settings, CLI, preflight, indexing, preprocessing, global indexing, dataset versioning, dataset inspection, baseline evaluation, MLflow infrastructure, EMA adapter/inference/training/validation workflows, and contract behavior.
-- AMT-S and Practical-RIFE adapters have not been started. EMA-VFI-small is the only model integrated through Milestone 7.
+- `docs/stage1_ml_core.md` documents current Milestone 1 through Milestone 9 settings, CLI, preflight, indexing, preprocessing, global indexing, dataset versioning, dataset inspection, baseline evaluation/video inference, MLflow infrastructure, EMA adapter/inference/training/validation workflows, AMT and Practical-RIFE adapter/inference/candidate-validation workflows, and contract behavior.
+- AMT-S eval/inference/candidate-validation integration is implemented through Milestone 8. AMT-S fine-tuning is deferred because upstream training expects precomputed flow files.
+- Practical-RIFE v4.25 eval/inference/candidate-validation integration is implemented through Milestone 9. Practical-RIFE fine-tuning is deferred because upstream training is not manifest-ready and assumes hardcoded `/data`, nori/S3 data access, distributed CUDA, TensorBoard logging, and separate training model paths.
 
 Important dependency observations:
 
@@ -190,10 +194,10 @@ Out of scope for Stage 1:
 - Kubernetes.
 - Distributed workers.
 
-Safely deferred within Stage 1 until the first EMA-VFI-small route works:
+Safely deferred within Stage 1 until the first EMA-VFI-small route works, then completed or revisited after the EMA route:
 
-- AMT-S adaptation.
-- Practical-RIFE adaptation.
+- AMT-S adaptation was completed for eval/inference/candidate validation in Milestone 8; fine-tuning remains deferred.
+- Practical-RIFE adaptation was completed for eval/inference/candidate validation in Milestone 9; fine-tuning remains deferred.
 - Optimized batched inference if sequential `predict_pair()` loops are sufficient.
 - MLflow Model Registry checkpoint loading if local checkpoint path loading is already working; local path loading must come first.
 - Full scratch training implementation. Config and CLI should acknowledge `scratch_train`, but the required implementation path is fine-tuning and eval-only.
@@ -216,6 +220,7 @@ Proposed local modules:
 - `video_interpolation.baselines`: duplication, blending, Farneback baseline predictors and baseline evaluation runner.
 - `video_interpolation.mlflow`: MLflow setup, parameter/metric/artifact logging helpers.
 - `video_interpolation.adapters.base`: `ModelAdapter` protocol/base class and shared image/tensor utilities.
+- `video_interpolation.adapters.baseline`: non-neural baseline adapter for duplicate-left, blending, and Farneback inference.
 - `video_interpolation.adapters.ema_vfi`: EMA-VFI-small adapter first.
 - `video_interpolation.adapters.amt`: AMT-S adapter after EMA is complete.
 - `video_interpolation.adapters.rife`: Practical-RIFE adapter last.
@@ -569,12 +574,15 @@ Likely files/modules:
 
 - `video_interpolation.adapters.amt`
 - `configs/models/amt_s.yaml`
-- `configs/training/amt_s_finetune.yaml`
+- `configs/inference/amt_s_2x.yaml`
+- `configs/validation/amt_s_candidate.yaml`
+- `configs/training/amt_s_finetune.yaml` only if the flow-file training dependency is resolved or an approved loss-policy change is made
 - possible thin wrapper files under `model_repos/AMT/`
 
 Expected output:
 
-- AMT-S eval-only, fine-tune, candidate validation, and local inference path.
+- AMT-S preflight, eval-only/candidate validation, and local inference path.
+- AMT-S fine-tuning only if upstream flow-file requirements can be satisfied with a bounded approved change.
 
 Validation checkpoint:
 
@@ -595,12 +603,13 @@ Likely files/modules:
 
 Expected output:
 
-- Practical-RIFE eval-only, fine-tune, candidate validation, and local inference path.
+- Practical-RIFE preflight, eval-only/candidate validation, and local inference path.
+- Practical-RIFE fine-tuning only if upstream hardcoded data/distributed/TensorBoard assumptions can be replaced with a bounded approved change.
 
 Validation checkpoint:
 
 - Pair inference smoke test with local train_log weights.
-- Training dataset no longer depends on hardcoded `/data` or nori/S3.
+- Training blocker is documented if hardcoded `/data`, nori/S3, distributed CUDA, and TensorBoard assumptions are not safely removable in Milestone 9.
 - Candidate validation report logged to MLflow.
 
 ### Milestone 10 - Documentation, Project Map, and Stage Handoff
@@ -772,6 +781,23 @@ Dependency decisions:
 - 2026-05-27: Milestone 6/7 validation completed in the real CUDA environment via escalated exact `uv run` commands: `ema-preflight` passed end to end; `ema adapter-check` reported repo/checkpoint/import/CUDA all ok; `ema infer-video --limit-pairs 1 --disable-mlflow` wrote `/tmp/stage1_ema_inference_smoke.mp4` with 1 interpolated pair and 3 frames; `ema validate-candidate --limit-samples 1 --no-lpips --disable-mlflow` wrote `/tmp/stage1_ema_validation_smoke/{metrics.csv,metrics_summary.csv,candidate_validation_report.json,sample_predictions/...}` and approved the pretrained candidate; `ema finetune --max-steps 1 --limit-train-samples 1 --limit-val-samples 1 --disable-mlflow` wrote `/tmp/stage1_ema_finetune_smoke/{best_checkpoint.pkl,last_checkpoint.pkl}`; checkpoint reload validation against the fine-tuned best checkpoint wrote `/tmp/stage1_ema_checkpoint_reload_validation/...` and approved the one-sample candidate.
 - 2026-05-27: Final exact validation passed: `uv run pytest` collected 16 tests and all passed; `uv run ruff check src tests` passed; updated `ema finetune --help` rendered with sample-limit overrides. MLflow logging for EMA workflows was deferred because the local MLflow service is not running; smoke commands used `--disable-mlflow`.
 - 2026-05-27: Expanded `docs/stage1_ml_core.md` EMA command sections with input and flag descriptions, defaults, and override behavior for `ema adapter-check`, `ema infer-video`, `ema finetune`, and `ema validate-candidate`.
+- 2026-05-27: Upgraded `ema infer-video` timing metrics. The workflow now measures model inference elapsed time around EMA `predict_pair()` calls, total command processing time, model pairs/sec, and total pairs/sec; these values appear in the CLI summary and are logged to MLflow with the existing inference metrics when MLflow is enabled.
+- 2026-05-27: Upgraded `ema infer-video` output writing from OpenCV `VideoWriter` to PyAV/FFmpeg. Inference still streams neighboring frame pairs through the EMA adapter, writes original/generated/original frames in order, uses FFmpeg encoder names, resolves per-codec encoder options, prints encoding settings with Rich, and remuxes input audio streams when compatible.
+- 2026-05-27: Updated `configs/inference/ema_vfi_small_2x.yaml`, `configs/inference/README.md`, and `docs/stage1_ml_core.md` for PyAV output settings: `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, `--codec`, audio preservation behavior, and CPU/GPU codec fallback guidance.
+- 2026-05-27: Added focused inference tests for config parsing, encoder option resolution, `mp4v` rejection, and a synthetic PyAV writer smoke that verifies a readable output video with preserved audio. Validation passed: exact escalated `uv run ruff check src tests`; exact escalated `uv run pytest` collected 21 tests and all passed; exact `uv run ... ema infer-video --codec libx264 --limit-pairs 1 --disable-mlflow` wrote `outputs/inference/ema_vfi_small/dora_2x.mp4` with 1 preserved AAC audio stream; configured `h264_nvenc` smoke wrote `/tmp/stage1_ema_pyav_nvenc_smoke.mp4` with H.264 video and preserved AAC audio.
+- 2026-05-27: Implemented Milestone 8 AMT-S eval/inference integration. Added `video_interpolation.adapters.amt`, `video_interpolation.amt_preflight`, `amt-preflight`, `amt adapter-check`, `amt infer-video`, `amt validate-candidate`, AMT configs under `configs/{models,inference,validation}/`, shared adapter factories in inference/validation, and focused AMT adapter tests. The AMT adapter builds upstream `networks.AMT-S.Model` from `model_repos/AMT/cfgs/AMT-S.yaml`, loads `model_weights/AMT/amt-s.pth` with PyTorch safe weights loading, and exposes `predict_pair`, sequential `predict_batch`, `predict`, and `__call__`.
+- 2026-05-27: AMT-S fine-tuning was investigated and deferred. Upstream `cfgs/AMT-S.yaml` and `datasets/vimeo_datasets.py` expect precomputed `flow_t0.flo`/`flow_t1.flo` files and include `MultipleFlowLoss`; the current project dataset versions are image-triplet manifests only. No flow artifacts were generated and no upstream AMT files were patched.
+- 2026-05-27: Milestone 8 validation completed in the CUDA environment via escalated exact `uv run` commands. `amt-preflight` passed end to end and reported repo/config/checkpoint/import/CUDA/model initialization/checkpoint load ok; `amt adapter-check` passed and documented the missing flow directory as an AMT fine-tuning blocker; `amt validate-candidate --limit-samples 1 --no-lpips --disable-mlflow` wrote `/tmp/amt_candidate_validation_smoke/{metrics.csv,metrics_summary.csv,candidate_validation_report.json,sample_predictions/...}` and approved the one-sample pretrained candidate; `amt infer-video --codec libx264 --limit-pairs 1 --disable-mlflow` wrote `/tmp/dora_amt_2x.mp4` with 3 frames, H.264/yuv420p video, and 1 preserved AAC audio stream. Final exact validation passed: `uv run pytest` collected 23 tests and all passed; `uv run ruff check src tests` passed; AMT CLI help rendered for `amt`, `amt infer-video`, and `amt validate-candidate`.
+- 2026-05-27: Added a future-patch reminder for AMT-S fine-tuning to `configs/training/README.md` and this ExecPlan. The reminder preserves the current decision to move on without adaptation, but records the likely choices for later: upstream Vimeo-style training with generated `.flo` files, project-native manifest-based AMT training with flow paths, or an approved no-flow loss policy.
+- 2026-05-27: Implemented Milestone 9 Practical-RIFE v4.25 eval/inference integration. Added `video_interpolation.adapters.rife`, `video_interpolation.rife_preflight`, `rife-preflight`, `rife adapter-check`, `rife infer-video`, `rife validate-candidate`, Practical-RIFE configs under `configs/{models,inference,validation}/`, and focused RIFE adapter tests. The adapter imports upstream `model/*` from `model_repos/Practical-RIFE`, imports selected `train_log` model code from `model_weights/Practical-RIFE/RIFEv4.25/train_log`, loads `flownet.pkl` with PyTorch safe weights loading, strips `module.` prefixes, pads to divisor 128, and exposes `predict_pair`, sequential `predict_batch`, `predict`, and `__call__`.
+- 2026-05-27: Practical-RIFE fine-tuning was investigated and deferred. Upstream training uses hardcoded `/data` paths, nori/S3-style dataset access, distributed CUDA setup, TensorBoard logging, and a training model path separate from the shipped `train_log` inference weights. No Practical-RIFE upstream files were patched.
+- 2026-05-27: Milestone 9 validation completed in the CUDA environment via escalated exact `uv run` commands. `rife-preflight` passed end to end and reported repo/checkpoint/import/CUDA/model initialization/checkpoint load ok; `rife adapter-check` passed and documented the training refactor as not required for eval/inference; `rife validate-candidate --limit-samples 1 --no-lpips --disable-mlflow` wrote `/tmp/rife_candidate_validation_smoke/{metrics.csv,metrics_summary.csv,candidate_validation_report.json,sample_predictions/...}` and approved the one-sample pretrained candidate; `rife infer-video --codec libx264 --limit-pairs 1 --disable-mlflow` wrote `/tmp/dora_rife_2x.mp4` with 3 frames, H.264/yuv420p video, and 1 preserved AAC audio stream. Final exact validation passed: `uv run pytest` collected 27 tests and all passed; `uv run ruff check src tests` passed; RIFE CLI help rendered for `rife`, `rife infer-video`, and `rife validate-candidate`; `ffprobe` confirmed the smoke output video stream is H.264/yuv420p at 60000/1001 FPS and the audio stream is AAC.
+- 2026-05-27: Added a Stage 1 baseline video inference follow-up. Added a ModelAdapter-compatible `BaselineAdapter` for `duplicate_left`, `blend`, and `farneback`, plus `baseline infer-video` and `configs/inference/baseline_2x.yaml`. Baseline video inference now reuses the shared PyAV/FFmpeg inference workflow, including original/generated frame interleaving, doubled FPS, audio remuxing, encoder settings, timing metrics, and optional MLflow logging.
+- 2026-05-27: Added an all-target directory inference wrapper. New `infer-all-videos --input-dir ...` discovers supported videos recursively, runs Practical-RIFE v4.25, AMT-S, EMA-VFI-small, and all three baseline methods, writes outputs under `outputs/inference/<target>/...`, preserves relative input subdirectories, and reuses the shared PyAV/FFmpeg inference workflow for each run.
+- 2026-05-27: Extended `infer-all-videos` with per-target measurement CSV export. Each model/baseline output directory now gets `inference_measurements.csv` with one row per input video containing model inference elapsed time, total elapsed time, pair/frame counts, FPS, throughput, audio preservation counts, output path, status, MLflow run id, and error text for failed runs.
+- 2026-05-27: Extended `infer-all-videos` with repeatable `--target`/`--method` selection. The default remains all targets, but the command can now run selected models, selected baselines, or groups such as `models` and `baselines`; short aliases include `ema`, `amt`, `rife`, `duplicate_left`, `blend`, and `farneback`.
+- 2026-05-27: Directory inference wrapper validation completed. Focused `tests/test_inference.py` passed, full `uv run pytest` collected 29 tests and all passed, `uv run ruff check src tests` passed, `infer-all-videos --help` rendered, and a one-video/one-pair smoke over `raw_data/tmp_test` with `--codec libx264 --disable-mlflow` completed 6/6 jobs and wrote outputs for Practical-RIFE, AMT-S, EMA-VFI-small, duplicate-left, blend, and Farneback under `outputs/inference`.
+- 2026-05-31: Closed Stage 1 as practically complete for the narrowed Stage 2 inference-runtime planning handoff. No Stage 1 implementation code was changed during closeout. Remaining full MLflow-backed runs still require starting the local MLflow Compose stack, and AMT-S/Practical-RIFE fine-tuning remain deferred for the blockers already recorded below.
 
 ## Surprises & Discoveries
 
@@ -803,6 +829,13 @@ Dependency decisions:
 - No MLflow service is currently running in this environment. Baseline MLflow logging support is implemented, but real MLflow logging validation remains deferred until the Compose stack is started.
 - EMA-VFI-small adapter/import checks can run in the sandbox, but model initialization, inference, fine-tuning, and candidate validation remain blocked here by CUDA absence. These commands now fail with clear adapter errors instead of entering a partial upstream path.
 - The local 2x inference implementation uses the project adapter rather than EMA upstream demo scripts. It reads videos with OpenCV, writes a new video with doubled FPS, and interleaves original/generated frames without modifying source videos.
+- The PyAV inference output path preserves audio for the Dora MP4 smoke by remuxing the input AAC stream into the output MP4. The output is encoded as H.264/yuv420p at doubled FPS and is readable by `ffprobe`.
+- AMT-S checkpoint loading with current PyTorch safe defaults initially failed because the checkpoint wrapper references `typing.OrderedDict`. Allowlisting `typing.OrderedDict`/`collections.OrderedDict` with `torch.serialization.safe_globals()` keeps safe weights loading enabled and loads the local `state_dict` successfully.
+- AMT-S one-pair inference on the 1920x1080 Dora smoke is noticeably slower than EMA in this environment: the model step took about 19.0s for one pair, with total command time about 22.4s using `libx264`. This is acceptable for a smoke check but should be considered before full-video AMT runs.
+- Practical-RIFE v4.25 and v4.26 local weight bundles currently have identical `RIFE_HDv3.py` and `IFNet_HDv3.py` files in the workspace. The default still uses v4.25 because upstream README recommends it for most scenes and the selected plan explicitly targets v4.25.
+- Practical-RIFE `flownet.pkl` contains extra teacher/caltime training keys that are not present in the inference network files stored in the same `train_log` directory. Non-strict checkpoint loading is therefore the correct default for eval/inference with the local v4.25 bundle.
+- Practical-RIFE inference requires input dimensions padded to an adequate divisor; unpadded tiny 32x32 tensors fail inside the upstream network because internal timestep/feature tensor sizes diverge. The adapter pads to divisor 128 and unpads predictions to original size.
+- Stage 2 starts from a narrowed serving-readiness scope focused on EMA-VFI and Practical-RIFE. AMT-S remains present in the Stage 1 codebase but is not an active Stage 2 refactor target unless the project owner explicitly changes scope.
 
 ## Decision Log
 
@@ -844,6 +877,16 @@ Dependency decisions:
 - 2026-05-27: Implemented local video inference with the project adapter rather than upstream `demo_2x.py`. Rationale: Stage 1 should exercise the same adapter path that evaluation, validation, and later serving will use.
 - 2026-05-27: Candidate validation saves each visual sample as `im1.png`, `im2_gt.png`, `im2_generated.png`, and `im3.png`, matching the revised baseline inspection format. Rationale: model candidates should be visually inspectable with the same left/middle/right context as baselines.
 - 2026-05-27: Padded EMA train/eval batches inside the adapter instead of rewriting upstream EMA model code. Rationale: inference already requires padded dimensions, and keeping padding at the adapter boundary fixes manifest image sizes without modifying the external repository.
+- 2026-05-27: Replaced OpenCV video output with PyAV/FFmpeg encoding for `ema infer-video` and rejected legacy `mp4v` instead of mapping it to `libx264`. Rationale: output encoding now needs FFmpeg codec options, playback-compatible pixel formats, and audio remuxing; silently translating OpenCV fourcc values would hide a config semantic change.
+- 2026-05-27: Implemented AMT-S as a thin project adapter over upstream AMT build utilities instead of patching `model_repos/AMT`. Rationale: eval/inference can use the upstream config/network/checkpoint directly, and Stage 1 model-specific glue belongs in adapters.
+- 2026-05-27: Loaded AMT-S checkpoints with PyTorch `weights_only=True` plus safe globals for the checkpoint's `OrderedDict` wrapper. Rationale: this avoids disabling PyTorch safe loading for local model weights while remaining compatible with the upstream checkpoint format.
+- 2026-05-27: Deferred AMT-S fine-tuning instead of generating flow files or removing AMT's flow loss. Rationale: upstream AMT training expects precomputed optical-flow targets; creating those artifacts or changing loss policy is non-trivial and should be approved separately.
+- 2026-05-27: Recorded AMT-S fine-tuning as a future patch rather than implementing it now. Rationale: the project needs an explicit adaptation-style decision before changing training: either preserve upstream Vimeo layout and generate `flow/<clip>/<sequence>/{flow_t0.flo,flow_t1.flo}`, implement a manifest-based AMT training runner with flow-path resolution, or approve a no-flow AMT loss policy inspired by the upstream GoPro config.
+- 2026-05-27: Generalized inference and candidate validation through adapter factories while preserving EMA command behavior. Rationale: AMT-S should reuse Stage 1's existing metrics, PyAV writer, MLflow, and report paths without weakening the shared `ModelAdapter` interface.
+- 2026-05-27: Selected Practical-RIFE `RIFEv4.25/train_log` as the default Stage 1 RIFE target. Rationale: upstream README recommends 4.25 for most scenes, matching local weights are present, and this follows the approved Milestone 9 plan.
+- 2026-05-27: Loaded Practical-RIFE checkpoints directly into `model.flownet` with `weights_only=True`, `module.` prefix stripping, and non-strict loading by default. Rationale: the shipped checkpoint contains training-only teacher/caltime keys not used by the inference network; non-strict loading keeps inference compatibility without patching upstream files.
+- 2026-05-27: Deferred Practical-RIFE fine-tuning instead of rewriting upstream training. Rationale: upstream training has hardcoded `/data`, nori/S3, distributed CUDA, TensorBoard, and separate training-model assumptions that require a deliberate future adaptation decision.
+- 2026-05-31: Closed this ExecPlan and moved it from `active/` to `completed/` for Stage 2 handoff. Rationale: the current user instruction considers Stage 1 practically complete and asks to start narrowed Stage 2 planning. Downstream implication: future work should create a new Stage 2 ExecPlan only after analysis and clarification questions are answered.
 
 ## Outcomes & Handoff
 
@@ -854,9 +897,11 @@ Dependency decisions:
 - Milestone 5 is implemented.
 - Milestone 6 is implemented.
 - Milestone 7 is implemented.
-- Delivered through Milestone 7: package skeleton, `.env.example`, settings, compact contracts, CLI, EMA preflight, dependency baseline, data config layout, source preprocessing/indexing modules, global sequence-index builder, manifest-only dataset-version builder, `UniversalTripletDataset`, metrics module, baseline evaluation, MLflow helper module, MLflow/PostgreSQL/MinIO Compose infrastructure, EMA-VFI-small adapter, local 2x video inference, EMA fine-tuning/eval-only runner, EMA candidate validation, focused tests, Stage 1 docs, config field docs, Rich CLI progress/summaries, debug preprocessing diagnostics, selected-video filters, per-video frame/duration limits, segment-seek selected-frame extraction, and updated project map.
-- Validated: CLI help, settings loading/display, contract tests, preprocessing/indexing/versioning/dataset/metrics/baseline/validation tests, ruff, lock/sync, sandbox EMA preflight reporting a clear CUDA blocker after successful dependency/import checks, user-confirmed real WSL CUDA EMA preflight success, exact real CUDA `ema-preflight` success, safe Vimeo source-index CLI smoke run to `/tmp`, safe preprocessing CLI smoke run using a temporary `/tmp` video and dataset root, MP4/MKV diagnostic preprocessing runs under `raw_data/tmp_test`, safe global-index smoke to `/tmp/stage1_m3_smoke/global_sequence_index.csv`, safe dataset-version smoke to `/tmp/stage1_m3_smoke/smoke_version/`, triplet dataset loading smoke on `dataset_versions/stage1_default/test_all.csv`, baseline evaluation smoke to `/tmp/stage1_m4_m5_baseline_smoke`, EMA one-pair video inference smoke to `/tmp/stage1_ema_inference_smoke.mp4`, EMA one-sample candidate validation smoke to `/tmp/stage1_ema_validation_smoke`, EMA one-step fine-tuning smoke to `/tmp/stage1_ema_finetune_smoke`, EMA checkpoint reload validation smoke to `/tmp/stage1_ema_checkpoint_reload_validation`, and MLflow Compose config rendering.
-- MLflow logging smoke against `MLFLOW_TRACKING_URI=http://localhost:5000` was attempted previously and failed clearly because no MLflow service is running in this environment. Milestone 6/7 EMA smoke commands used `--disable-mlflow`; start `infra/mlflow/docker-compose.yml` before validating real MLflow-backed training/inference/validation runs.
-- The next session should start Milestone 8: AMT-S adapter and fine-tuning route. Do not start Practical-RIFE work until AMT-S is handled according to the selected model order.
-- Update this ExecPlan's Progress, Surprises & Discoveries, Decision Log, and Outcomes & Handoff during implementation.
-- Update `.agent/docs/PROJECT_MAP.md` when implementation adds important files/directories or when the stage reaches closeout.
+- Milestone 8 is implemented for AMT-S eval/inference/candidate validation; AMT-S fine-tuning is deferred/blocked by missing upstream flow targets.
+- Milestone 9 is implemented for Practical-RIFE v4.25 eval/inference/candidate validation; Practical-RIFE fine-tuning is deferred/blocked by upstream training assumptions that are not manifest-ready.
+- Delivered through Milestone 9: package skeleton, `.env.example`, settings, compact contracts, CLI, EMA/AMT/Practical-RIFE preflight utilities, dependency baseline, data config layout, source preprocessing/indexing modules, global sequence-index builder, manifest-only dataset-version builder, `UniversalTripletDataset`, metrics module, baseline evaluation and baseline video inference, all-target directory video inference with per-target measurement CSVs, MLflow helper module, MLflow/PostgreSQL/MinIO Compose infrastructure, EMA-VFI-small adapter, AMT-S adapter, Practical-RIFE adapter, baseline adapter, local 2x video inference with PyAV/FFmpeg output and audio preservation for EMA/AMT/Practical-RIFE/baselines, EMA fine-tuning/eval-only runner, EMA/AMT/Practical-RIFE candidate validation, focused tests, Stage 1 docs, config field docs, Rich CLI progress/summaries, debug preprocessing diagnostics, selected-video filters, per-video frame/duration limits, segment-seek selected-frame extraction, and updated project map.
+- Validated: CLI help, settings loading/display, contract tests, preprocessing/indexing/versioning/dataset/metrics/baseline/validation/inference/AMT-adapter/RIFE-adapter tests, ruff, lock/sync, sandbox EMA preflight reporting a clear CUDA blocker after successful dependency/import checks, user-confirmed real WSL CUDA EMA preflight success, exact real CUDA `ema-preflight` success, safe Vimeo source-index CLI smoke run to `/tmp`, safe preprocessing CLI smoke run using a temporary `/tmp` video and dataset root, MP4/MKV diagnostic preprocessing runs under `raw_data/tmp_test`, safe global-index smoke to `/tmp/stage1_m3_smoke/global_sequence_index.csv`, safe dataset-version smoke to `/tmp/stage1_m3_smoke/smoke_version/`, triplet dataset loading smoke on `dataset_versions/stage1_default/test_all.csv`, baseline evaluation smoke to `/tmp/stage1_m4_m5_baseline_smoke`, EMA one-pair video inference smoke to `/tmp/stage1_ema_inference_smoke.mp4`, EMA PyAV `libx264` one-pair smoke to `outputs/inference/ema_vfi_small/dora_2x.mp4`, EMA PyAV `h264_nvenc` one-pair smoke to `/tmp/stage1_ema_pyav_nvenc_smoke.mp4`, EMA one-sample candidate validation smoke to `/tmp/stage1_ema_validation_smoke`, EMA one-step fine-tuning smoke to `/tmp/stage1_ema_finetune_smoke`, EMA checkpoint reload validation smoke to `/tmp/stage1_ema_checkpoint_reload_validation`, AMT preflight and adapter-check, AMT one-sample candidate validation smoke to `/tmp/amt_candidate_validation_smoke`, AMT one-pair video inference smoke to `/tmp/dora_amt_2x.mp4`, Practical-RIFE preflight and adapter-check, Practical-RIFE one-sample candidate validation smoke to `/tmp/rife_candidate_validation_smoke`, Practical-RIFE one-pair video inference smoke to `/tmp/dora_rife_2x.mp4`, all-target directory inference smoke to `outputs/inference/{practical_rife_v4_25,amt_s,ema_vfi_small,baselines/...}/001_2x.mp4`, `ffprobe` verification of AMT and Practical-RIFE output H.264/yuv420p video plus AAC audio, and MLflow Compose config rendering.
+- MLflow logging smoke against `MLFLOW_TRACKING_URI=http://localhost:5000` was attempted previously and failed clearly because no MLflow service is running in this environment. Milestone 6/7 EMA and Milestone 8 AMT smoke commands used `--disable-mlflow`; start `infra/mlflow/docker-compose.yml` before validating real MLflow-backed training/inference/validation runs.
+- Stage 1 is closed as practically complete for the next planning stage. The project map and human-facing docs already describe the Stage 1 modules, configs, commands, outputs, and known limitations closely enough for Stage 2 planning.
+- The next session should create `.agent/docs/exec-plans/active/02_inference_runtime_refactor.execplan.md` only after the Stage 2 analysis is accepted and the project owner answers the open design questions.
+- This ExecPlan is closed. Reopen or amend it only if the project owner explicitly requests a Stage 1 correction.

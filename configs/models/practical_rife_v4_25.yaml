@@ -1,0 +1,8 @@
+model_name: practical_rife_v4_25
+repo_name: Practical-RIFE
+checkpoint_path: Practical-RIFE/RIFEv4.25/train_log
+device: cuda
+timestep: 0.5
+scale: 1.0
+divisor: 128
+strict_checkpoint: false

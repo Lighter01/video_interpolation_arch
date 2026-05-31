@@ -1,0 +1,28 @@
+{
+  "candidate_id": "amt_s_candidate",
+  "model_name": "amt_s",
+  "model_adapter": "AMTAdapter",
+  "checkpoint": "AMT/amt-s.pth",
+  "dataset_version_id": "stage1_default",
+  "test_manifest_path": "dataset_versions/stage1_default/test_all.csv",
+  "validation_thresholds": {
+    "min_psnr_mean": 25.0,
+    "min_ssim_mean": 0.8,
+    "max_lpips_mean": null
+  },
+  "aggregate_metrics": {
+    "psnr_mean": 37.0447356,
+    "ssim_mean": 0.97307459,
+    "lpips_mean": 0.01942147
+  },
+  "approval_decision": "approved",
+  "decision_reasons": [
+    "all configured thresholds passed"
+  ],
+  "artifact_paths": {
+    "metrics_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/amt_s/stage1_default/metrics.csv",
+    "metrics_summary_csv": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/amt_s/stage1_default/metrics_summary.csv",
+    "sample_predictions": "/home/lighter_01/projects/itmo/ai_architecture/video_interpolation/outputs/candidate_validation/amt_s/stage1_default/sample_predictions"
+  },
+  "created_at": "2026-05-27T08:25:27.743818+00:00"
+}

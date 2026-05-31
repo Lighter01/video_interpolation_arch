@@ -1,0 +1,9 @@
+model_name: amt_s
+repo_name: AMT
+config_path: cfgs/AMT-S.yaml
+checkpoint_path: AMT/amt-s.pth
+device: cuda
+embt: 0.5
+scale_factor: 1.0
+divisor: 16
+strict_checkpoint: true

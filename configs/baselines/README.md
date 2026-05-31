@@ -63,3 +63,28 @@ Common failures:
 - Frame files are missing under `DATASET_ROOT`.
 - LPIPS is requested on CUDA when CUDA is unavailable.
 - MLflow logging is enabled but the tracking server is not running.
+
+## Baseline Video Inference
+
+Baseline methods are also available through a `ModelAdapter`-compatible wrapper for local video inference.
+
+Command:
+
+```bash
+uv run python -m video_interpolation.cli baseline infer-video \
+  --config configs/inference/baseline_2x.yaml \
+  --baseline blend \
+  --input raw_data/tmp_test/Dora.mp4 \
+  --output /tmp/dora_blend_2x.mp4 \
+  --codec libx264 \
+  --limit-pairs 2 \
+  --disable-mlflow
+```
+
+Supported `--baseline` values:
+
+- `duplicate_left`
+- `blend`
+- `farneback`
+
+The command uses the same PyAV/FFmpeg writer as model inference, so output videos preserve compatible audio streams and use the same `codec`, `container`, `pix_fmt`, `frame_format`, and encoder option behavior documented in `configs/inference/README.md`.

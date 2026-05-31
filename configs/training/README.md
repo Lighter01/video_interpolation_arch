@@ -58,3 +58,41 @@ Common failures:
 - MLflow logging is enabled but the tracking server is not running.
 - A manifest frame path is missing under `DATASET_ROOT`.
 - `scratch_train` is selected; Stage 1 currently implements fine-tuning and eval-only for EMA first.
+
+## AMT-S Fine-Tuning Status
+
+AMT-S fine-tuning is not enabled in Milestone 8. Upstream AMT's Vimeo training dataset expects precomputed optical-flow files such as `flow_t0.flo` and `flow_t1.flo`, and `cfgs/AMT-S.yaml` includes a `MultipleFlowLoss` over those flow targets. The current project dataset versions are image-triplet manifests only.
+
+Implemented AMT-S workflows are:
+
+- `uv run python -m video_interpolation.cli amt-preflight`
+- `uv run python -m video_interpolation.cli amt adapter-check`
+- `uv run python -m video_interpolation.cli amt validate-candidate ...`
+- `uv run python -m video_interpolation.cli amt infer-video ...`
+
+Future patch reminder:
+
+- Do not start AMT-S fine-tuning until the project chooses an adaptation style.
+- Option A: keep upstream AMT's Vimeo-style training path. Generate `flow_t0.flo` and `flow_t1.flo` under `datasets/sources/vimeo_triplet/flow/<clip>/<sequence>/`, then expose the existing Vimeo layout and split-list files to AMT's upstream training code. This is closest to the authors' training setup, but it bypasses project dataset-version manifests unless extra glue is added.
+- Option B: implement a project-native manifest-based AMT training runner. Keep AMT model/loss logic, but load `train_all.csv` and `val_all.csv` through a manifest dataset that also resolves flow paths. This fits the Stage 1 architecture better, but it requires more adapter/training code and an explicit flow-path convention or manifest columns.
+- Option C: use a no-flow training policy inspired by AMT's GoPro config, which removes `MultipleFlowLoss`. This avoids flow generation, but changes the training objective and should be approved before implementation.
+
+If training with flows is selected, first make LiteFlowNet flow generation reproducible in the current CUDA/PyTorch environment, ensure its weights are available locally or through an approved download, and generate a small bounded flow subset before attempting full Vimeo flow generation.
+
+## Practical-RIFE Fine-Tuning Status
+
+Practical-RIFE fine-tuning is not enabled in Milestone 9. Upstream Practical-RIFE training currently uses hardcoded `/data` paths, nori/S3-style dataset access, distributed CUDA assumptions, TensorBoard logging, and a training model path that is separate from the shipped `train_log` inference weights. The current Stage 1 Practical-RIFE integration therefore supports eval-only/candidate validation and local video inference first.
+
+Implemented Practical-RIFE workflows are:
+
+- `uv run python -m video_interpolation.cli rife-preflight`
+- `uv run python -m video_interpolation.cli rife adapter-check`
+- `uv run python -m video_interpolation.cli rife validate-candidate ...`
+- `uv run python -m video_interpolation.cli rife infer-video ...`
+
+Future patch reminder:
+
+- Do not start Practical-RIFE fine-tuning until the project chooses an adaptation style.
+- Option A: keep more upstream Practical-RIFE training logic and replace only the dataset layer with project manifest loading. This preserves more author logic but still requires removing hardcoded `/data`, nori/S3, distributed, and TensorBoard assumptions.
+- Option B: implement a project-native Practical-RIFE training runner around the selected `RIFE_HDv3.Model`/`flownet` update behavior, using `train_all.csv` and `val_all.csv` through `UniversalTripletDataset`. This fits the Stage 1 architecture better, but requires careful loss/optimizer/checkpoint parity review.
+- Option C: treat Practical-RIFE as eval/inference-only for Stage 1 and defer fine-tuning until after the EMA route is used for training demonstrations.
