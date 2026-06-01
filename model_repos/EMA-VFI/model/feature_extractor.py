@@ -3,6 +3,26 @@ import torch.nn as nn
 import math
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 
+
+def _is_exporting():
+    if torch.onnx.is_in_onnx_export():
+        return True
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None and getattr(compiler, "is_compiling", lambda: False)():
+        return True
+    return False
+
+
+def _cache_key_for_shape(shape, device, dtype):
+    if _is_exporting():
+        return None
+    key = (tuple(shape), str(device), str(dtype))
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
 def window_partition(x, window_size):
     B, H, W, C = x.shape
     x = x.view(B, H // window_size[0], window_size[0], W // window_size[1], window_size[1], C)
@@ -219,7 +239,7 @@ class MotionFormerBlock(nn.Module):
             x_pad = torch.roll(x_pad, shifts=(-self.shift_size[0], -self.shift_size[1]), dims=(1, 2))
             cor_pad = torch.roll(cor_pad, shifts=(-self.shift_size[0], -self.shift_size[1]), dims=(1, 2))
             
-            if hasattr(self, 'HW') and self.HW.item() == H_p * W_p: 
+            if not _is_exporting() and hasattr(self, 'HW') and self.HW.item() == H_p * W_p:
                 shift_mask = self.attn_mask
             else:
                 shift_mask = torch.zeros((1, H_p, W_p, 1))  # 1 H W 1
@@ -244,8 +264,9 @@ class MotionFormerBlock(nn.Module):
                 if mask is not None:
                     shift_mask = shift_mask.masked_fill(mask != 0, 
                                 float(-100.0))
-                self.register_buffer("attn_mask", shift_mask)
-                self.register_buffer("HW", torch.Tensor([H_p*W_p]))
+                if not _is_exporting():
+                    self.attn_mask = shift_mask
+                    self.HW = torch.tensor([H_p * W_p], device=shift_mask.device)
         else: 
             shift_mask = mask
         
@@ -454,12 +475,19 @@ class MotionFormer(nn.Module):
             if m.bias is not None:
                 m.bias.data.zero_()
 
-    def get_cor(self, shape, device):
-        k = (str(shape), str(device))
-        if k not in self.cor:
-            tenHorizontal = torch.linspace(-1.0, 1.0, shape[2], device=device).view(
+    def get_cor(self, shape, device, dtype=None):
+        dtype = dtype or torch.float32
+        k = _cache_key_for_shape(shape, device, dtype)
+        if k is None:
+            tenHorizontal = torch.linspace(-1.0, 1.0, shape[2], device=device, dtype=dtype).view(
                 1, 1, 1, shape[2]).expand(shape[0], -1, shape[1], -1).permute(0, 2, 3, 1)
-            tenVertical = torch.linspace(-1.0, 1.0, shape[1], device=device).view(
+            tenVertical = torch.linspace(-1.0, 1.0, shape[1], device=device, dtype=dtype).view(
+                1, 1, shape[1], 1).expand(shape[0], -1, -1, shape[2]).permute(0, 2, 3, 1)
+            return torch.cat([tenHorizontal, tenVertical], -1).to(device)
+        if k not in self.cor:
+            tenHorizontal = torch.linspace(-1.0, 1.0, shape[2], device=device, dtype=dtype).view(
+                1, 1, 1, shape[2]).expand(shape[0], -1, shape[1], -1).permute(0, 2, 3, 1)
+            tenVertical = torch.linspace(-1.0, 1.0, shape[1], device=device, dtype=dtype).view(
                 1, 1, shape[1], 1).expand(shape[0], -1, -1, shape[2]).permute(0, 2, 3, 1)
             self.cor[k] = torch.cat([tenHorizontal, tenVertical], -1).to(device)
         return self.cor[k]
@@ -485,7 +513,7 @@ class MotionFormer(nn.Module):
                     x, H, W = patch_embed(xs)
                 else:
                     x, H, W = patch_embed(x)
-                cor = self.get_cor((x.shape[0], H, W), x.device)
+                cor = self.get_cor((x.shape[0], H, W), x.device, x.dtype)
                 for blk in block:
                     x, x_motion = blk(x, cor, H, W, B)
                     motion_features[i].append(x_motion.reshape(2*B, H, W, -1).permute(0, 3, 1, 2).contiguous())

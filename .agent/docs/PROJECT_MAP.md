@@ -37,6 +37,7 @@ Agent-facing documentation and development logs.
 ### `.agent/docs/exec-plans/active/`
 
 - `02_inference_runtime_refactor.execplan.md` — active Stage 2 ExecPlan for inference runtime refactor, PyTorch/Nx serving readiness, ONNX feasibility/export/runtime where feasible, and minimal BentoML compatibility proof.
+- `02_5_inference_runtime_stabilization.execplan.md` — active Stage 2.5 ExecPlan for ONNX stabilization, real-image equivalence, true model batch inference, mini-benchmarks, and Stage 2 handoff readiness.
 
 ### `.agent/docs/exec-plans/completed/`
 
@@ -53,6 +54,19 @@ Raw videos, splitted by domains, to preprocess into training triplets.
 ### `raw_data/anime`
 
 Anime domain video files.
+
+### `raw_data/pair_test`
+
+Small real image-pair fixtures for Stage 2.5 ONNX-vs-PyTorch equivalence checks.
+
+- `001/`, `002/`, `003/` — each contains `frame1.png` and `frame2.png`; currently inspected as `512 x 320` RGB PNG pairs.
+
+### `raw_data/tmp_test`
+
+Short MP4 smoke inputs for local inference and later Stage 2.5 batch/benchmark checks.
+
+- `001.mp4` through `007.mp4` — short 1080p/60 FPS clips.
+- `DORA_cut.mp4` — small 1080p clip preferred for first safe smoke/benchmark runs.
 
 ## `datasets/`
 
@@ -174,6 +188,9 @@ Generated model export artifacts.
 
 Stage 2 ONNX export output root. Export commands write model/version-oriented subdirectories such as `ema_vfi_small/` and `practical_rife_v4_26/` with original and optional simplified `.onnx` files.
 
+- `stage2_5_m2_export112/` — Milestone 2 EMA legacy dynamic-axes re-export probe at `112x112`; investigation artifact, not a preferred serving artifact.
+- `stage2_5_m2_dynamo_after_cache_patch/` — Milestone 2 EMA dynamo-export probe; static-H/W `112x112` investigation artifact with external data, not a preferred serving artifact.
+
 ## `outputs/`
 
 Generated reports and local workflow artifacts.
@@ -181,6 +198,8 @@ Generated reports and local workflow artifacts.
 ### `outputs/onnx_validation/`
 
 Stage 2 ONNX Runtime validation output root. `ema validate-onnx` and `rife validate-onnx` write per-model `equivalence_report.json`, `equivalence_metrics.csv`, and optional sample PyTorch/ONNX/difference PNGs for tensor mismatches.
+
+- `stage2_5_m2/` — Milestone 2 EMA ONNX investigation reports for legacy dynamic failure, 56-multiple padding probes, larger legacy re-export, and modern dynamo-export probe.
 
 ## `src/video_interpolation/`
 
@@ -285,6 +304,7 @@ Human-facing project documentation.
 
 - `stage1_ml_core.md` — Stage 1 workflow notes for current implemented milestones.
 - `stage2_inference_runtime_refactor.md` — Stage 2 runtime API, local fixed 2x/Nx video inference behavior, request-time Practical-RIFE scale policy, backend boundaries, Practical-RIFE source policy, ONNX export/runtime validation status, and current BentoML deferrals.
+- `stage2_5_inference_runtime_stabilization.md` — concise Stage 2.5 baseline notes for current ONNX artifacts, validation outputs, real-image/video smoke inputs, and batch terminology before stabilization work.
 
 ## `tests/`
 
