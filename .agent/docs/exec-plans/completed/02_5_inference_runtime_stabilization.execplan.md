@@ -1,7 +1,7 @@
 # Title and Metadata
 
 - Stage: Stage 2.5 - ONNX Stabilization, Real-Image Equivalence, and Batched Inference
-- Status: Active ExecPlan - Task 2.5 EMA dynamic ONNX refactor trial complete, Milestone 3 not started
+- Status: Completed ExecPlan - accepted, Stage 2 resumed at Milestone 8
 - Created: 2026-06-01
 - Updated: 2026-06-01
 - Stage plan: `.agent/stage_plans/02_5_inference_runtime_stabilization_stage_plan.md`
@@ -19,7 +19,7 @@ The stage must resolve, classify, or explicitly defer the technical blockers fou
 - Practical-RIFE ONNX can execute at dynamic sizes, but ONNX-vs-PyTorch equivalence is not yet trusted.
 - Local video inference is still model-sequential, and `batch_inference.py` means directory-wide orchestration rather than true model batching.
 
-The stage must produce a clear runtime path for PyTorch batch inference, expanded ONNX equivalence evidence on synthetic and real images, mini-benchmarks with MLflow logging, user-facing documentation, and a handoff pointer back to Stage 2.
+The stage must produce a clear runtime path for PyTorch batch inference, expanded ONNX equivalence evidence on synthetic and real images, video-pipeline benchmarks with MLflow logging, user-facing documentation, and a handoff pointer back to Stage 2.
 
 This is not a backend stage. It must not implement BentoML proof work, production BentoML services, FastAPI, Celery, Redis, PostgreSQL application schema, MinIO upload/output orchestration, frontend, monitoring, retraining triggers, AMT-S refactor, or training/fine-tuning changes.
 
@@ -82,42 +82,44 @@ Read before creating this ExecPlan:
 - `raw_data/tmp_test/`
 - `pyproject.toml`
 
-The current user task and the Stage 2.5 stage plan control this stage. The active Stage 2 ExecPlan controls prior implementation facts and must remain paused until Stage 2.5 is complete.
+The current user task and the Stage 2.5 stage plan control this stage. The active Stage 2 ExecPlan controls prior implementation facts and may resume from Milestone 8 after user acceptance of this Stage 2.5 closeout.
 
 ## Context and Current Repository State
 
 Repository root: `/home/lighter_01/projects/itmo/ai_architecture/video_interpolation`.
 
-Stage 1 is complete for handoff. Stage 2 has completed Milestones 1 through 7 and is paused before Milestone 8, the minimal BentoML compatibility proof.
+Stage 1 is complete for handoff. Stage 2.5 has completed Milestones 1 through 9 and is ready for user acceptance before Stage 2 resumes.
 
 Current runtime implementation:
 
-- `src/video_interpolation/inference_runtime/api.py` defines `FramePairRequest`, `FramePairResult`, `InferenceMode`, `RuntimeBackendKind`, mode/factor validation, and timestep generation for fixed 2x and arbitrary Nx.
-- `FramePairRequest` accepts CHW or NCHW tensors, but the current model runtimes treat the result as one logical pair result and append `prediction[0]`; there is not yet a public true batch result contract.
-- `src/video_interpolation/inference_runtime/ema.py` has `EMAVFIPyTorchRuntime` and `EMAVFIOnnxRuntime`. Both loop over request timesteps in Python and return one unbatched intermediate frame per timestep.
-- `src/video_interpolation/inference_runtime/rife.py` has `PracticalRIFEPyTorchRuntime` and `PracticalRIFEOnnxRuntime`. Both loop over request timesteps in Python. RIFE ONNX requires request scale to match the scale baked into the artifact.
-- `src/video_interpolation/inference_runtime/onnx_export.py` exports neural-core-only wrappers: `left`, `right`, `timestep` to one generated frame. It currently uses legacy `torch.onnx.export(..., dynamo=False)` with dynamic axes for dynamic H/W mode.
-- `src/video_interpolation/inference_runtime/onnx_validation.py` compares synthetic tensor pairs only. It reports MAE, max absolute error, MSE, and `torch.allclose`, and writes PyTorch/ONNX/diff images when allclose fails.
-- `src/video_interpolation/inference.py` decodes and encodes videos and calls `_predict_video_pair(...)` once per neighboring frame pair. This path is sequential at the model-call level.
-- `src/video_interpolation/batch_inference.py` discovers videos, resolves target names, builds output paths and run names, and writes measurement CSVs. It is directory-wide workflow orchestration, not model batch inference.
-- `ModelAdapter.predict_batch(...)` in `src/video_interpolation/adapters/base.py` is explicitly a sequential default wrapper over `predict_pair(...)`.
+- `src/video_interpolation/inference_runtime/api.py` defines `FramePairRequest`, `FramePairResult`, `ModelBatchRequest`, `ModelBatchResult`, `FlattenedFramePairBatch`, `PairTimestepIndex`, `InferenceMode`, `RuntimeBackendKind`, mode/factor validation, and timestep generation for fixed 2x and arbitrary Nx.
+- `FramePairRequest` accepts CHW or NCHW tensors. `ModelBatchRequest` is the separate true model batch contract and requires BCHW `left`/`right` tensors with matching batch size and shape.
+- `ModelBatchRequest.flatten_pair_timesteps()` defines the later runtime execution order as pair-major/timestep-minor. `ModelBatchResult.from_flattened_outputs(...)` reconstructs flattened BCHW outputs into `outputs[pair_index][timestep_index]`.
+- `src/video_interpolation/inference_runtime/ema.py` has `EMAVFIPyTorchRuntime` and `EMAVFIOnnxRuntime`. Both PyTorch and viable constrained-dynamic ONNX paths now support `predict_batch(ModelBatchRequest)` using pair-major pair×timestep flattening; EMA ONNX uses true multi-row ORT calls when the artifact supports symbolic batch.
+- `src/video_interpolation/inference_runtime/rife.py` has `PracticalRIFEPyTorchRuntime` and `PracticalRIFEOnnxRuntime`. PyTorch and accepted dynamic-batch ONNX paths support true model-batch execution; RIFE ONNX requires request scale to match the scale baked into the artifact and rejects fixed-batch artifacts.
+- `src/video_interpolation/inference_runtime/onnx_export.py` exports neural-core-only wrappers: `left`, `right`, `timestep` to one generated frame. Dynamo export is the default and declares symbolic batch plus dynamic H/W; legacy export remains available explicitly.
+- `src/video_interpolation/inference_runtime/onnx_validation.py` compares synthetic and real tensor pairs. It reports MAE, max absolute error, MSE, `torch.allclose`, graph I/O, padded/output shapes, and visual PyTorch/ONNX/diff images when relevant.
+- `src/video_interpolation/inference.py` decodes and encodes videos through the local workflow, supports explicit `sequential` and default `batched` execution modes, and uses `ModelBatchRequest` for chunked EMA/RIFE video inference where adapters support it.
+- `src/video_interpolation/batch_inference.py` discovers videos, resolves target names, builds output paths and run names, and writes measurement CSVs. It remains directory-wide workflow orchestration, separate from true model batch inference.
+- `ModelAdapter.predict_batch(...)` in `src/video_interpolation/adapters/base.py` remains a sequential default wrapper over `predict_pair(...)`; EMA and Practical-RIFE override it for fixed 2x model-batch execution and expose `predict_frame_pairs_batch(ModelBatchRequest)` for fixed 2x and Nx.
 
 Current model/config state:
 
 - `configs/models/ema_vfi_small.yaml` uses `EMA-VFI/ours_small_t.pkl` as the Stage 2 inference checkpoint and records `EMA-VFI/ours_small.pkl` as the training checkpoint.
 - `configs/models/practical_rife_v4_26.yaml` is the active Practical-RIFE default. `configs/models/practical_rife_v4_25.yaml` remains available as an alternative.
-- EMA and Practical-RIFE configs declare `fixed_2x` and `arbitrary_nx` support with factor bounds `2..8`.
+- EMA and Practical-RIFE configs declare `fixed_2x` and `arbitrary_nx` support with factor bounds `2..8` and optional `inference_batch_size` caps for flattened PyTorch model-batch rows.
 - `pyproject.toml` already lists `onnx`, `onnxruntime`, `onnxruntime-gpu`, `onnx-simplifier`, `bentoml`, and `onnxscript`; Stage 2.5 should not add dependencies unless a specific gap is discovered.
 
 Current ONNX artifacts and validation outputs:
 
-- `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamic_hw_opset17.onnx`
-- `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamic_hw_opset17.simplified.onnx`
-- `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamic_hw_opset17.onnx`
-- `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamic_hw_opset17.simplified.onnx`
+- `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx`
+- `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx.data`
+- `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx`
+- `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx.data`
 - ONNX validation reports exist under `outputs/onnx_validation/`.
-- EMA validation at the original export-like size can pass strict tolerance, but changed H/W fails with a LayerNormalization shape error in the EMA feature extractor.
-- Practical-RIFE validation reports show provider-sensitive differences. CPU original-artifact reports show low MAE with max absolute error slightly above `1e-3` at dynamic shapes. Some current JSON reports under `outputs/onnx_validation/` show CUDA provider runs with larger max differences. Stage 2.5 must reconcile report provenance by rerunning controlled validations and recording provider, artifact, shape, and command metadata.
+- Obsolete EMA Milestone 2 and Task 2.5 trial export/output directories were cleaned before Milestone 3. The accepted EMA artifact is now the promoted constrained-dynamic opset 18 artifact under `model_exports/onnx/ema_vfi_small/`.
+- EMA ONNX requires project-owned external divisor `112` padding; divisor `32` still fails and should not be used for the constrained-dynamic artifact.
+- Practical-RIFE now has a dynamo opset 18 artifact with symbolic batch plus symbolic `128*height_units` and `128*width_units`. It runs at multiple H/W shapes and true flattened batch sizes; strict `1e-3` allclose still fails on some larger synthetic shapes, while controlled real-image equivalence passes on the current pair fixtures.
 
 Current EMA ONNX risk area:
 
@@ -158,7 +160,7 @@ Implementation-ready requirements:
 - Make batch inference VRAM-aware and configurable with an explicit batch-size control and clear OOM behavior.
 - Implement PyTorch batch inference for EMA-VFI and Practical-RIFE.
 - Implement ONNX batch inference only if the relevant ONNX path remains viable.
-- Add mini-benchmarks comparing backend, execution mode, interpolation mode, factor, and batch size where applicable.
+- Add video-pipeline benchmarks comparing backend, execution mode, interpolation mode, factor, and batch size where applicable.
 - Benchmark timing should include decode, preprocessing/tensor conversion, model inference, postprocessing, encode, and total time where practical.
 - Log benchmark params, metrics, CSV/JSON summaries, and artifacts to MLflow using existing `src/video_interpolation/mlflow.py` conventions when MLflow is enabled.
 - Add human-facing documentation for diagnostics, equivalence, batch inference, benchmark usage, limitations, and fallback recommendations.
@@ -333,13 +335,14 @@ Only implement ONNX batch inference for a model after its ONNX path is classifie
 
 ### Benchmarks and MLflow
 
-Add a small benchmark workflow, likely in a new module such as `src/video_interpolation/inference_benchmark.py` or `src/video_interpolation/benchmarks.py`, with CLI wiring in `src/video_interpolation/cli.py`.
+Milestone 8 implements a video-pipeline benchmark workflow in `src/video_interpolation/inference_benchmark.py`, with CLI wiring in `src/video_interpolation/cli.py`.
 
 Benchmark targets:
 
-- synthetic tensor pairs for pure runtime microbenchmarks;
-- real image pairs from `raw_data/pair_test`;
-- very short clips from `raw_data/tmp_test` for video-level benchmarks.
+- one input video through `--input`, defaulting to `raw_data/tmp_test/DORA_cut.mp4`;
+- directory inputs through `--input-dir` and optional `--limit-videos`;
+- existing local video inference paths through `run_video_inference(...)`, including decode, preprocessing, model interpolation, postprocessing, encode/flush, and audio remux timing;
+- no separate video interpolation implementation.
 
 Benchmark dimensions:
 
@@ -465,6 +468,22 @@ Validation checkpoint:
 
 - Tests for invalid shapes, factor validation, timestep count, pair/timestep ordering, and result shape/order reconstruction.
 
+Milestone 4 implementation status:
+
+- Added `ModelBatchRequest`, `FlattenedFramePairBatch`, `PairTimestepIndex`, and `ModelBatchResult` to `src/video_interpolation/inference_runtime/api.py`.
+- The request contract accepts only BCHW `left`/`right` frame batches, validates batch-size and full-shape agreement, reuses existing factor/mode/timestep validation, and preserves sequential `FramePairRequest` behavior.
+- Fixed 2x produces one flattened row per pair with repeated timestep `0.5`.
+- Nx uses pair-by-timestep flattening: for `B` pairs and factor `N`, flattened batch size is `B * (N - 1)` and row order is `(pair 0, timestep 0..N-2)`, then `(pair 1, timestep 0..N-2)`, and so on.
+- `ModelBatchResult` documents/enforces reconstructed output indexing as `outputs[pair_index][timestep_index]` and can rebuild this structure from flattened BCHW model outputs.
+- No EMA-VFI, Practical-RIFE, local video inference, or ONNX Runtime batch execution was wired in this milestone.
+
+Milestone 4 validation:
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_inference_runtime_api.py` passed: `20 passed`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed: `106 passed, 14 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed.
+- `git diff --check` passed.
+
 ### Milestone 5 - PyTorch Batch Inference for EMA-VFI and Practical-RIFE
 
 Objective: Implement true model batch calls for both active PyTorch runtimes.
@@ -493,6 +512,24 @@ Validation checkpoint:
 - Focused CPU-safe tests where possible.
 - CUDA smoke commands recorded if available.
 
+Milestone 5 implementation status:
+
+- Added `predict_batch(ModelBatchRequest) -> ModelBatchResult` to `EMAVFIPyTorchRuntime` and `PracticalRIFEPyTorchRuntime`.
+- Both PyTorch runtimes use the Milestone 4 pair-major pair×timestep flattening contract. Fixed 2x produces `B` flattened rows. Nx produces `B * (N - 1)` flattened rows and reconstructs `outputs[pair_index][timestep_index]`.
+- Both runtimes default to one model call for the full flattened batch. Optional `inference_batch_size` in model configs or `ModelBatchRequest.backend_options` caps flattened rows per PyTorch model call for memory control.
+- EMA `fast_tta` forces effective batch size `1`, because the upstream fast-TTA inference implementation indexes only the first two augmented predictions and is not correct for larger model batches.
+- Added adapter-level `predict_frame_pairs_batch(ModelBatchRequest)` for EMA/RIFE and changed EMA/RIFE `predict_batch([(left, right), ...])` to use the true fixed-2x model-batch path. Existing `predict_pair`, `predict_intermediate_frames`, `predict_frame_pair`, `predict`, and `__call__` remain available.
+- Stage 1 EMA training/fine-tuning code paths remain unchanged; `train_step` and `eval_step` still use the upstream training/update path and do not instantiate the inference runtime.
+- ONNX batch inference and local video chunked batching were not started.
+
+Milestone 5 validation:
+
+- Fake/lightweight tests cover fixed 2x batch output ordering, Nx pair×timestep flattening/reconstruction, `outputs[pair_index][timestep_index]`, effective batch-size chunking, adapter wrappers, sequential compatibility, invalid batch shapes via `ModelBatchRequest`, and factor validation.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_ema_adapter.py tests/test_rife_adapter.py` passed: `27 passed`.
+- CUDA was unavailable: `torch.cuda.is_available()` returned `False`.
+- Real EMA-VFI CPU batch smokes passed on two `32x32` synthetic pairs at factors `2`, `4`, and `8`; each factor used one flattened model call and returned `3x32x32` outputs.
+- Real Practical-RIFE CPU batch smokes passed on two `32x32` synthetic pairs at factors `2`, `4`, and `8`; each factor used one flattened model call and returned `3x32x32` outputs.
+
 ### Milestone 6 - Video-Level Chunked Batch Inference
 
 Objective: Make local video inference able to use model batching while preserving sequential fallback.
@@ -519,6 +556,29 @@ Validation checkpoint:
 - Tests for chunk overlap, output ordering, factor 2/4/8 frame counts, fallback behavior, and measurement metadata.
 - Tiny video smoke only, no long jobs.
 
+Milestone 6 implementation status:
+
+- Added `VideoInferenceExecutionMode` and top-level `execution_mode` / `inference_batch_size` fields to `VideoInferenceConfig`.
+- Local video inference defaults to `batched`, with explicit `sequential` available through config or CLI.
+- The batched path builds overlapping source-frame chunks, stacks neighboring pairs into BCHW tensors, calls adapter `predict_frame_pairs_batch(ModelBatchRequest)`, and writes `outputs[pair_index][timestep_index]` in video order.
+- Chunk boundaries overlap by one source frame: the final source frame of one chunk is carried into the next chunk as its first source frame.
+- `inference_batch_size` is treated as the flattened model-row cap used by Milestone 5. Fixed 2x consumes one row per source pair; Nx consumes `interpolation_factor - 1` rows per source pair, so video pair chunk size is derived from factor and cap.
+- Adapters without `predict_frame_pairs_batch(...)` automatically use `sequential_fallback`; explicit `sequential` mode bypasses the batch adapter path.
+- Measurement metadata now records requested and actual execution mode, inference batch size, batch chunk count, model batch request count, interpolation factor, existing timing fields, FPS, pair/frame counts, runtime backend, runtime options, and audio preservation counts.
+- CLI support was added for `--execution-mode` and `--inference-batch-size` on EMA/RIFE `infer-video` and the directory-wide `infer-all-videos` wrapper.
+- Configs for EMA and Practical-RIFE video inference now declare batched mode fields. ONNX batch inference, benchmark workflows, and MLflow benchmark logging were not started.
+
+Milestone 6 validation:
+
+- Focused fake-runtime video tests cover chunk overlap, output frame counts for factors `2`, `4`, and `8`, generated-frame ordering, output FPS multiplication, `inference_batch_size` validation, explicit sequential mode, sequential fallback, measurement CSV fields, and sequential/batched order equivalence.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_inference.py` passed: `27 passed`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed: `124 passed, 14 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed.
+- `git diff --check` passed.
+- CUDA was unavailable: `torch.cuda.is_available()` returned `False`.
+- Real Practical-RIFE CPU video smokes passed on `raw_data/tmp_test/DORA_cut.mp4` with `limit_pairs=1`, `execution_mode=batched`, and `codec=libx264` for fixed `2x` and Nx factor `4`.
+- Real EMA-VFI CPU video smokes passed on `raw_data/tmp_test/DORA_cut.mp4` with `limit_pairs=1`, timestep-capable checkpoint `EMA-VFI/ours_small_t.pkl`, `execution_mode=batched`, and `codec=libx264` for fixed `2x` and Nx factor `4`.
+
 ### Milestone 7 - ONNX Batch Inference Where Viable
 
 Objective: Add ONNX batch inference only for models whose ONNX paths remain acceptable.
@@ -542,30 +602,106 @@ Validation checkpoint:
 - Real-image batch equivalence smoke where feasible.
 - Provider and artifact metadata recorded.
 
-### Milestone 8 - Mini-Benchmarks and MLflow Logging
+Milestone 7 implementation status:
+
+- Implemented `predict_batch(ModelBatchRequest) -> ModelBatchResult` for `EMAVFIOnnxRuntime`.
+- EMA ONNX batch uses the same pair-major pair×timestep flattening contract as PyTorch. The accepted EMA dynamo artifact has symbolic batch and constrained dynamic H/W, so fixed 2x and Nx flattened rows can execute in true multi-row ONNX Runtime calls. Optional `inference_batch_size` on the ONNX runtime config or request backend options caps flattened rows per ORT call.
+- Implemented `predict_batch(ModelBatchRequest) -> ModelBatchResult` for `PracticalRIFEOnnxRuntime`.
+- Practical-RIFE ONNX real-image CPU evidence from Milestone 3 supports retaining the ONNX path. The initial Milestone 7 implementation preserved batch-request semantics through static-batch-1 chunks because the then-current RIFE dynamo artifact had fixed batch `1`; Milestone 7.5 supersedes that runtime path with a dynamic-batch artifact and fixed-batch artifact rejection.
+- Sequential ONNX `predict(FramePairRequest)` remains available for both models.
+- PyTorch batch inference behavior was not changed.
+- AMT-S ONNX batch support was skipped because AMT-S ONNX is out of Stage 2.5 scope.
+- True multi-row Practical-RIFE ONNX batching moved to the Milestone 7.5 follow-up before Milestone 8.
+- CUDA-provider ONNX batch validation was deferred because CUDA is unavailable in this environment.
+
+Milestone 7 validation:
+
+- Focused ONNX runtime tests cover EMA fixed 2x and Nx batch reconstruction, EMA sequential-vs-batch compatibility, invalid backend handling, RIFE fixed-batch artifact rejection, RIFE dynamic-batch reconstruction, RIFE scale mismatch validation, and provider/artifact metadata.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_onnx_runtime.py` passed: `20 passed, 19 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed: `130 passed, 24 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed.
+- `git diff --check` passed.
+- Accepted EMA artifact smoke: `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx`, original unsimplified plus `.onnx.data`, CPU provider. Fixed 2x on two `112x112` pairs used one ORT call; Nx factor 4 on two `112x112` pairs used one ORT call for six flattened rows.
+- Pre-7.5 Practical-RIFE artifact smoke: `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_hw_opset18_h384w512.onnx`, original unsimplified plus `.onnx.data`, CPU provider. Fixed 2x on two `128x128` pairs used two ORT calls; Nx factor 4 on two `128x128` pairs used six ORT calls because the artifact batch dimension is static `1`.
+
+### Milestone 7.5 - Dynamic-Batch ONNX Export Follow-Up
+
+Objective: Replace Practical-RIFE static-batch ONNX behavior with a dynamic-batch dynamo artifact before benchmark work.
+
+Implementation status:
+
+- Added shared symbolic batch to the dynamo `dynamic_shapes` export policy for `left`, `right`, and `timestep`, preserving constrained dynamic H/W multiples.
+- Exposed ONNX Runtime graph input/output shapes from the backend so model runtimes can inspect fixed versus symbolic batch dimensions.
+- Updated Practical-RIFE ONNX defaults to `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx`, default `inference_batch_size=None`, and true multi-row flattened batch execution.
+- Practical-RIFE ONNX runtime now rejects fixed-batch artifacts at load time; no static-batch-1 fallback support was added.
+- Default dynamo artifact resolution now prefers `dynamic_batch_hw` artifacts when present, while explicit `--onnx-path` remains available.
+
+Milestone 7.5 validation:
+
+- Exported `practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` plus `.onnx.data` using dynamo/opset 18, external H/W multiple `128`, sample shape `1x3x384x512`, and scale `1.0`.
+- Graph I/O: `left[batch,3,128*height_units,128*width_units]`, `right[batch,3,128*height_units,128*width_units]`, `timestep[batch,1,1,1]`, output batch `batch`.
+- CPU RIFE fixed-2x synthetic validation ran on `128x128`, `128x256`, and `320x512` and wrote `outputs/onnx_validation/stage2_5_m7_5_rife_dynamic_batch_fixed2x/`. Runtime shape behavior passes; strict synthetic allclose retains the known larger-shape RIFE drift with mean MAE `4.6398597e-05` and max abs `0.0087888837`.
+- CPU RIFE batch smoke report `outputs/onnx_validation/stage2_5_m7_5_rife_dynamic_batch_batch_smoke/batch_dynamic_report.json` covers fixed 2x flattened batches `1`, `2`, and `4`, non-square `128x256`, sample-different `320x512`, and Nx factor 4 flattened batches `3` and `6`; each scenario used one ORT call.
+- CPU RIFE real-pair validation was rerun against the dynamic-batch artifact under `outputs/onnx_validation/stage2_5_m7_5_rife_dynamic_batch_real_pairs/`; all three `raw_data/pair_test` pairs pass strict `1e-3` allclose with MAE `6.4718541e-07`, max abs `9.4920397e-05`, PSNR `116.6313`, and SSIM `1.0`.
+- The old fixed-batch RIFE dynamo artifact was explicitly load-tested and rejected with a dynamic-batch artifact error.
+- EMA constrained-dynamic artifact was re-verified on CPU. `outputs/onnx_validation/stage2_5_m7_5_ema_dynamic_batch_fixed2x/` passed fixed 2x on `64x64`, `112x168`, and `320x512`; `outputs/onnx_validation/stage2_5_m7_5_ema_dynamic_batch_batch_smoke/batch_dynamic_report.json` passed fixed 2x flattened batches `1`, `2`, and `4` plus Nx factor 4 flattened batches `3` and `6`, all in one ORT call and all strict allclose.
+- CUDA-provider ONNX batch validation remains deferred because CUDA is unavailable in this environment.
+
+### Milestone 8 - Video Benchmarks and MLflow Logging
 
 Objective: Add small repeatable benchmark workflows and log them to MLflow where available.
 
-Likely files/modules:
+Implementation status:
 
-- new benchmark module under `src/video_interpolation/`
-- `src/video_interpolation/cli.py`
-- `src/video_interpolation/mlflow.py`
-- `tests/`
-- output directory such as `outputs/benchmarks/`
+- Reworked `src/video_interpolation/inference_benchmark.py` for video-pipeline runtime benchmarks over the existing `run_video_inference(...)` path.
+- Added `benchmark runtime` CLI command in `src/video_interpolation/cli.py`.
+- Added `log_benchmark_run(...)` in `src/video_interpolation/mlflow.py`, delegating to the existing bounded MLflow helper behavior.
+- Added focused tests in `tests/test_inference_benchmark.py`.
+- Benchmark reports write to `outputs/benchmarks/video/` by default and include `benchmark_report.json`, `benchmark_metrics.csv`, and real generated benchmark videos under `videos/<profile>/`.
+- Video inference results now expose `VideoInferenceTiming` with decode, preprocessing, model inference, postprocessing, video encode/flush, audio remux, and total timings. Directory-wide inference measurement CSVs include the same breakdown.
+- ONNX benchmark runs use lightweight benchmark adapters around `EMAVFIOnnxRuntime` and `PracticalRIFEOnnxRuntime`, so the existing video inference path can call `predict_frame_pair(...)` and `predict_frame_pairs_batch(...)`.
 
 Expected output:
 
-- CLI/API for synthetic, real-pair, and tiny-video benchmarks.
+- CLI/API for single-video and directory video-pipeline runtime benchmarks.
 - CSV/JSON benchmark summaries.
-- Timing breakdowns.
-- MLflow params, metrics, and artifacts when enabled.
+- Timing breakdowns for decode, preprocessing/tensor conversion, model inference, postprocessing/frame conversion, video encode/flush, audio remux, total time, throughput, batch chunks/model batch requests, and peak PyTorch CUDA VRAM when available.
+- MLflow params, aggregate metrics, and report artifacts when enabled. Generated videos are logged only when `--log-output-videos` is set.
 - `--disable-mlflow` for local smoke runs.
+- No separate video interpolation implementation; benchmarks use the same local inference workflow as production-style smoke commands.
 
 Validation checkpoint:
 
-- Tests for benchmark aggregation and MLflow-disabled behavior.
-- Short benchmark smoke on synthetic inputs and/or `raw_data/pair_test`.
+- Tests for benchmark config validation, directory discovery, output path layout, aggregation, CSV/JSON writing, MLflow-disabled behavior, fake-runtime sequential execution, fake-runtime batched Nx execution, failed-video reporting, and video timing fields passed.
+- Focused command passed: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_inference_benchmark.py tests/test_inference.py`.
+- Focused lint passed: `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src/video_interpolation/inference.py src/video_interpolation/inference_benchmark.py src/video_interpolation/cli.py tests/test_inference_benchmark.py tests/test_inference.py`.
+
+Milestone 8 smoke command:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m video_interpolation.cli benchmark runtime \
+  --model practical_rife_v4_26 \
+  --backend onnx \
+  --execution-mode batched \
+  --input raw_data/tmp_test/DORA_cut.mp4 \
+  --limit-pairs 2 \
+  --provider cpu \
+  --codec libx264 \
+  --output-dir outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke \
+  --disable-mlflow
+```
+
+Smoke result:
+
+- output: `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/benchmark_report.json`
+- CSV: `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/benchmark_metrics.csv`
+- model/backend/mode: Practical-RIFE v4.26 ONNX batched fixed 2x, CPU provider (`CPUExecutionProvider`)
+- input: `raw_data/tmp_test/DORA_cut.mp4`, capped to `--limit-pairs 2`
+- output video: `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/videos/practical_rife_v4_26_onnx_cpu_batched_fixed_2x_2x_bauto/DORA_cut_repeat00_2x.mp4`
+- source frames/pairs/generated/frames written: `3` / `2` / `2` / `5`
+- batch chunks/model batch requests: `2` / `2`
+- timing: decode `0.11354650s`, preprocessing `0.09657892s`, model `5.62656432s`, postprocessing `0.04529195s`, encode `0.10067545s`, audio remux `0.00034524s`, total `6.38277020s`
+- MLflow: disabled for smoke; MLflow server availability was not validated in this environment.
 
 ### Milestone 9 - Documentation, Project Map, and Stage 2 Handoff
 
@@ -591,9 +727,10 @@ Expected output:
 
 Validation checkpoint:
 
-- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest`
-- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests`
-- Smoke commands and deferred CUDA checks recorded.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed after the documentation closeout: `141 passed, 30 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed after the documentation closeout: `All checks passed`.
+- `git diff --check` passed after the documentation closeout.
+- Smoke commands and deferred CUDA checks are recorded in this ExecPlan and the public Stage 2.5 documentation.
 
 ## Validation Strategy
 
@@ -644,7 +781,7 @@ Expected completion artifacts:
 - PyTorch batch inference support for EMA-VFI and Practical-RIFE.
 - Video-level chunked batch inference support with sequential fallback.
 - Optional ONNX batch support for viable model/backend combinations.
-- Benchmark CLI/API and output summaries, likely under `outputs/benchmarks/`.
+- Benchmark CLI/API and output summaries under `outputs/benchmarks/`.
 - MLflow benchmark runs when enabled.
 - Updated inference configs or README docs for `inference_batch_size`, execution mode, fallback behavior, and benchmark settings.
 - Updated `docs/` for Stage 2.5 workflows.
@@ -690,6 +827,63 @@ Recovery:
 - 2026-06-01: Started and completed Milestone 1 baseline audit only. Inspected current ONNX artifacts, ONNX validation JSON/CSV outputs, pair-test images, temporary smoke videos, Stage 2 docs/ExecPlan handoff notes, EMA feature-extractor risk areas, current ONNX validation code, and existing batch terminology in `batch_inference.py` / adapter APIs. Added `docs/stage2_5_inference_runtime_stabilization.md` and updated `.agent/docs/PROJECT_MAP.md`. No source code, configs, model repositories, dependencies, model weights, ONNX artifacts, or validation reports were changed. Code validation was skipped because this milestone changed only documentation and the ExecPlan.
 - 2026-06-01: Started and completed Milestone 2 EMA ONNX dynamic/constrained-dynamic investigation. Reproduced the existing legacy EMA ONNX dynamic-H/W failure, tested the 56-multiple external-padding hypothesis, tried a larger legacy trace shape, tried the modern `torch.onnx.export(..., dynamo=True, dynamic_shapes=...)` route, and applied narrow EMA cache/export-safety patches in `model_repos/EMA-VFI/model/feature_extractor.py` and `model_repos/EMA-VFI/model/warplayer.py`. Classification: EMA ONNX currently works only for export-size/static-like inputs and is not suitable for dynamic serving; EMA serving should remain PyTorch-only unless a later broad upstream refactor is approved. Milestone 3 was not started.
 - 2026-06-01: Completed the explicit Task 2.5 broader EMA refactor trial requested in `.agent/tasks/TASK_2_5.md`. Refactored EMA transformer window reversal, frame-pair swapping, export-time padding/depadding, shift-mask construction, coordinate grids, and warp grids to support the modern dynamo exporter. Added selectable `legacy`/`dynamo` ONNX exporter support, constrained `--dynamic-hw-multiple` export shapes, custom `--artifact-stem`, EMA validation `--divisor`, and richer ONNX validation reports. Exported one bounded constrained-dynamic EMA artifact at opset 18 with symbolic `112*height_units` and `112*width_units`; validation passed on original `64x64`, `112x168`, and `320x512` inputs with external divisor `112`. Classification is now `2. EMA constrained-dynamic ONNX works with documented external padding constraints`; divisor `32` still fails, so this is not fully dynamic.
+- 2026-06-01: Prepared the repository for Milestone 3 by promoting the accepted EMA constrained-dynamic ONNX artifact into `model_exports/onnx/ema_vfi_small/`, removing obsolete EMA Milestone 2 and Task 2.5 export directories plus EMA ONNX validation output directories, updating EMA ONNX runtime defaults to the promoted artifact with divisor `112`, and preserving Practical-RIFE artifacts/outputs for Milestone 3 real-image validation.
+- 2026-06-01: Completed a pre-Milestone-3 Practical-RIFE dynamo export alignment. Made dynamo/opset 18/no-simplify the default ONNX export mode, kept legacy export and simplification available explicitly, added RIFE `--exporter`, `--dynamic-hw-multiple`, and `--artifact-stem`, patched project-owned RIFE warp grids for symbolic export, exported `practical_rife_v4_26_dynamo_dynamic_hw_opset18_h384w512.onnx` plus `.onnx.data`, and validated that one artifact runs at `128x128`, `128x256`, and `320x512`. Strict allclose still fails on the larger shapes, so Practical-RIFE equivalence remains a Milestone 3 evidence item.
+- 2026-06-01: Started and completed Milestone 3 real-image ONNX-vs-PyTorch equivalence. Added real pair discovery/loading for `raw_data/pair_test/*/frame1.png` and `frame2.png`, real-pair validation commands `ema validate-onnx-real` and `rife validate-onnx-real`, per-pair visual artifacts, PSNR/SSIM metrics, and richer provenance fields. CPU real-pair checks passed for EMA constrained-dynamic divisor `112` and Practical-RIFE v4.26 dynamo artifacts on pairs `001`, `002`, and `003`. Batch inference, benchmarks, and BentoML work were not started.
+- 2026-06-01: Started and completed Milestone 4 model batch API contract. Added BCHW-only `ModelBatchRequest`, pair-major `FlattenedFramePairBatch`/`PairTimestepIndex`, and `ModelBatchResult` reconstruction as `outputs[pair_index][timestep_index]`. Added focused tests for invalid batch inputs, batch-size agreement, factor/timestep validation, pair×timestep flattened ordering, reconstruction order, and fixed 2x compatibility. No model runtime, adapter, local-video, ONNX-batch, benchmark, or BentoML execution wiring was started.
+- 2026-06-01: Started and completed Milestone 5 PyTorch batch inference. Wired `ModelBatchRequest` into EMA-VFI and Practical-RIFE PyTorch runtimes, added adapter `predict_frame_pairs_batch(...)`, changed EMA/RIFE adapter `predict_batch(...)` to use fixed-2x true model batching, added optional `inference_batch_size` memory caps, and preserved sequential pair APIs. Fake/lightweight tests and real CPU tiny smokes passed. No video chunking, ONNX batch inference, benchmarks, MLflow benchmark logging, or BentoML work was started.
+- 2026-06-01: Started and completed Milestone 6 video-level chunked batch inference. Added local video execution-mode and flattened-row batch-size config, chunked overlapping video batching through `ModelBatchRequest`, sequential fallback, CLI flags, measurement CSV fields, focused fake-runtime tests, and documentation updates. Full pytest, ruff, diff check, and short CPU real-runtime video smokes for EMA/RIFE 2x and 4x passed. ONNX batch inference, benchmark workflows, MLflow benchmark logging, and BentoML work were not started.
+- 2026-06-01: Started and completed Milestone 7 ONNX batch inference where viable. Added `predict_batch(ModelBatchRequest)` to EMA and Practical-RIFE ONNX runtimes. EMA uses true multi-row ORT batching with the constrained-dynamic dynamo artifact. Practical-RIFE initially preserved batch-request semantics through static-batch-1 chunks because the then-current RIFE artifact had fixed batch `1`; this was superseded by Milestone 7.5. Focused tests and CPU tensor-level artifact smokes passed. AMT-S ONNX batch, true multi-row RIFE ONNX batch, CUDA-provider validation, benchmarks, MLflow benchmark logging, and BentoML work were not started.
+- 2026-06-01: Started and completed Milestone 7.5 dynamic-batch ONNX follow-up. Added shared symbolic batch to dynamo export shapes, exported `practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` plus `.onnx.data`, updated Practical-RIFE ONNX runtime defaults to the new artifact, removed static-batch-1 chunking, and made fixed-batch RIFE artifacts fail fast. CPU RIFE runtime batch smokes proved one ORT call for flattened batches `1`, `2`, `3`, `4`, and `6`; EMA constrained-dynamic ONNX batch verification passed fixed 2x and Nx smokes with strict allclose. CUDA-provider validation, benchmarks, MLflow benchmark logging, and BentoML work were not started.
+- 2026-06-01: Reworked Milestone 8 after user review from tensor/image-pair benchmarking to video-pipeline benchmarking. `benchmark runtime` now defaults to `raw_data/tmp_test/DORA_cut.mp4`, supports `--input` or `--input-dir` plus `--limit-videos`, calls the existing `run_video_inference(...)` path for every measured run, writes real benchmark videos, and records decode/preprocess/model/postprocess/encode/audio-remux/total timing in reports and measurement CSVs. No separate video interpolation loop was introduced.
+- 2026-06-01: Completed Milestone 9 documentation and Stage 2 handoff. Updated this ExecPlan outcomes section, the paused Stage 2 ExecPlan pointer, `docs/stage2_5_inference_runtime_stabilization.md`, and `.agent/docs/PROJECT_MAP.md`. Recorded final EMA/RIFE ONNX decisions, PyTorch-vs-ONNX serving recommendations, batch and benchmark status, unresolved blockers, and the exact Stage 2 Milestone 8 restart path. No runtime, ONNX, batch, benchmark, BentoML, backend, model-weight, or dataset behavior was changed.
+
+## Milestone 3 Real-Image Equivalence
+
+Milestone 3 adds real-image ONNX-vs-PyTorch checks alongside the existing synthetic checks. The implementation extends `src/video_interpolation/inference_runtime/onnx_validation.py` with:
+
+- `discover_real_image_pairs(...)` for validating pair directories under `raw_data/pair_test/`;
+- `run_real_pair_equivalence_check(...)` for running PyTorch and ONNX predictors on the same loaded RGB tensors;
+- report fields for `input_group`, `pair_id`, source frame paths, padded shapes, output shapes, artifact kind, padding policy, graph I/O, MAE, max absolute error, MSE, PSNR, SSIM, and visual output paths;
+- visual artifacts under `<output>/<model>/<provider>/<pair_id>/left.png`, `right.png`, `pytorch_generated.png`, `onnx_generated.png`, and `absdiff.png`.
+
+CLI commands:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m video_interpolation.cli rife validate-onnx-real \
+  --torch-device cpu \
+  --provider cpu \
+  --output-dir outputs/onnx_validation/stage2_5_m3_real_pairs
+
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m video_interpolation.cli ema validate-onnx-real \
+  --torch-device cpu \
+  --provider cpu \
+  --divisor 112 \
+  --output-dir outputs/onnx_validation/stage2_5_m3_real_pairs
+```
+
+Both commands default to evidence-gathering mode: they write reports even when `allclose` fails and exit non-zero only for setup/reporting failures. `--fail-on-mismatch` restores strict validation exit behavior. `--limit-pairs` bounds smoke runs.
+
+Real-pair output root:
+
+```text
+outputs/onnx_validation/stage2_5_m3_real_pairs/
+  ema_vfi_small/cpu/
+  practical_rife_v4_26/cpu/
+```
+
+CPU results on `raw_data/pair_test/001`, `002`, and `003`:
+
+| Model | Artifact / settings | Original shape | Padded shape | Result | Aggregate metrics |
+| --- | --- | --- | --- | --- | --- |
+| `ema_vfi_small` | `ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx`, external divisor `112`, CPU provider | `3x320x512` | `1x3x336x560` | all 3 pairs pass strict `1e-3` allclose | MAE `3.6674443e-07`, max abs `6.8575144e-05`, MSE `1.2800672e-12`, PSNR `125.4239`, SSIM `1.0` |
+| `practical_rife_v4_26` | `practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx`, scale `1.0`, external divisor `128`, CPU provider | `3x320x512` | `1x3x384x512` | all 3 pairs pass strict `1e-3` allclose | MAE `6.4718541e-07`, max abs `9.4920397e-05`, MSE `4.2880933e-12`, PSNR `116.6313`, SSIM `1.0` |
+
+Classification after Milestone 3:
+
+- EMA ONNX remains constrained-dynamic, accepted for continued investigation with documented external divisor `112` padding. Real-pair CPU evidence is strong; no static bucket fallback was added.
+- Practical-RIFE v4.26 ONNX real-pair CPU evidence is strong with the new dynamo artifact. The earlier synthetic larger-shape mismatch remains documented, but realistic `512x320` pair fixtures pass strict allclose after project-owned padding/unpadding.
+- CUDA-provider real-pair validation is deferred because this environment does not provide a usable CUDA PyTorch/ORT runtime.
 
 ## Milestone 1 Baseline Audit
 
@@ -701,16 +895,18 @@ Current artifacts under `model_exports/onnx/`:
 
 | Model target | Artifact | Kind | Size | ONNX graph metadata | Dynamic/static status | Current role |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ema_vfi_small` | `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamic_hw_opset17.onnx` | original | `58,858,828` bytes | IR 8, opset `ai.onnx:17`, producer `pytorch 2.11.0`; inputs `left[batch,3,height,width]`, `right[batch,3,height,width]`, `timestep[batch,1,1,1]`; output `intermediate_frame[batch,3,height,width]`; `6122` nodes | Dynamic axes are present, but runtime evidence shows changed H/W is not truly safe | Fallback/debug artifact; resolver prefers simplified when present |
-| `ema_vfi_small` | `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamic_hw_opset17.simplified.onnx` | simplified | `58,534,582` bytes | IR 8, opset `ai.onnx:17`, producer `pytorch 2.11.0`; same nominal dynamic input/output axes; `2311` nodes | Dynamic axes are present, but runtime evidence shows changed H/W is not truly safe | Current default/preferred artifact by `resolve_preferred_onnx_artifact_path(..., prefer_simplified=True)` |
+| `ema_vfi_small` | `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` plus `.onnx.data` | original with external data | `1.8 MiB` ONNX + `56 MiB` external data | IR/opset from Task 2.5 dynamo export; inputs/outputs use symbolic `112*height_units` and `112*width_units` | Constrained-dynamic H/W with external divisor `112`; divisor `32` fails | Current accepted EMA artifact for Milestone 3 |
+| `practical_rife_v4_26` | `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` plus `.onnx.data` | original with external data | `935,650` bytes ONNX + `23,019,520` bytes external data | Inputs use symbolic `batch`, `128*height_units`, and `128*width_units`; output batch is symbolic | Dynamic batch plus constrained dynamic H/W with external divisor `128`; fixed 2x and Nx flattened batches run in one ORT call | Current Practical-RIFE artifact after Milestone 7.5 |
 | `practical_rife_v4_26` | `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamic_hw_opset17.onnx` | original | `22,875,748` bytes | IR 8, opset `ai.onnx:17`, producer `pytorch 2.11.0`; inputs `left[batch,3,height,width]`, `right[batch,3,height,width]`, `timestep[batch,1,1,1]`; output `intermediate_frame[batch,Addintermediate_frame_dim_1,height,width]`; `1577` nodes | Can execute at multiple H/W based on current reports | Fallback/debug artifact; CPU report suggests it may have better equivalence than current simplified CUDA reports, but controlled rerun is needed |
-| `practical_rife_v4_26` | `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamic_hw_opset17.simplified.onnx` | simplified | `22,848,842` bytes | IR 8, opset `ai.onnx:17`, producer `pytorch 2.11.0`; inputs `left[batch,3,height,width]`, `right[batch,3,height,width]`, `timestep[unk__123,1,1,1]`; output `intermediate_frame[batch,3,height,width]`; `768` nodes | Can execute at multiple H/W based on current reports | Current default/preferred artifact by resolver, but not yet accepted for serving equivalence |
+| `practical_rife_v4_26` | `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamic_hw_opset17.simplified.onnx` | simplified | `22,848,842` bytes | IR 8, opset `ai.onnx:17`, producer `pytorch 2.11.0`; inputs `left[batch,3,height,width]`, `right[batch,3,height,width]`, `timestep[unk__123,1,1,1]`; output `intermediate_frame[batch,3,height,width]`; `768` nodes | Can execute at multiple H/W based on current reports | Legacy fallback/comparison artifact |
+
+The old EMA legacy opset 17 artifacts and Stage 2.5 investigation export directories were removed after the Task 2.5 trial because they are superseded by the promoted constrained-dynamic artifact.
 
 Milestone 1 did not run ONNX checker or simplifier again. Stage 2 handoff recorded that both original exports passed ONNX checker and simplification succeeded.
 
 ### ONNX validation report inventory
 
-Current reports under `outputs/onnx_validation/`:
+Historical report inventory from Milestone 1. The EMA rows below refer to outputs that were later cleaned before Milestone 3; the Practical-RIFE rows still describe retained comparison artifacts.
 
 | Report | Model / artifact | Provider request and observed session | Shapes and status | Metrics | Input source / visuals |
 | --- | --- | --- | --- | --- | --- |
@@ -730,13 +926,11 @@ Limitations in existing reports:
 
 ### EMA-VFI current ONNX status
 
-- Export artifacts exist for original and simplified dynamic-H/W opset 17 graphs. Stage 2 handoff says ONNX checker and simplification succeeded.
-- The exported graphs expose symbolic `batch`, `height`, and `width` axes, but current ONNX Runtime evidence shows the graph is only superficially dynamic.
-- EMA runs at the original export-like `32x32` shape and passes strict tolerance in current reports.
-- EMA fails at changed `64x64` H/W with an ONNX Runtime `LayerNormalization` shape mismatch in `/net/feature_bone/block4.0/norm2/LayerNormalization`.
-- The failure is consistent with EMA feature-extractor Python shape logic and traced constants rather than a missing ONNX artifact.
-- Known suspicious source areas remain in `model_repos/EMA-VFI/model/feature_extractor.py`: `pad_if_needed`, `depad_if_needed`, `window_partition`, `window_reverse`, `self.HW`, `attn_mask`, `feature_bone.cor`, `math.ceil`, `int(...)`, `.item()`, and shape-based `if` logic.
-- Milestone 2 must investigate dynamic or constrained-dynamic behavior, including the Stage 2.5 plan's 56-multiple padding hypothesis. Milestone 1 made no EMA fixes.
+- The current accepted artifact is `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` plus `.onnx.data`.
+- The graph exposes symbolic constrained H/W as `112*height_units` and `112*width_units`.
+- EMA ONNX requires project-owned external divisor `112` padding and unpadding. Divisor `32` still fails.
+- The old original/simplified legacy opset 17 EMA artifacts were removed before Milestone 3 because they were only superficially dynamic and failed changed H/W.
+- Milestone 3 should use the accepted constrained-dynamic artifact for real-image equivalence and should not reopen the EMA dynamic-shape refactor.
 
 ### Practical-RIFE current ONNX status
 
@@ -809,9 +1003,11 @@ Narrow EMA upstream runtime/cache changes:
 
 Rationale: the modern `torch.export`/dynamo route initially failed on EMA shape-keyed caches with `TypeError: unhashable type: non-nested SymInt`. The patch removes that concrete blocker while preserving eager PyTorch behavior. It does not attempt a broad rewrite of EMA's shape-dependent window/padding logic.
 
-### Legacy ONNX status after reproduction
+### Historical legacy ONNX status after reproduction
 
-Current preferred legacy artifact:
+These EMA legacy paths were Milestone 2 evidence and were removed before Milestone 3 after the Task 2.5 constrained-dynamic artifact was promoted.
+
+Historical preferred legacy artifact:
 
 ```text
 model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamic_hw_opset17.simplified.onnx
@@ -1068,14 +1264,14 @@ All are within the Task 2.5 acceptance threshold of MAE `<= 1e-5` and max abs `<
 Accepted artifact:
 
 ```text
-model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx
-model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx.data
+model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx
+model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx.data
 ```
 
 Export command:
 
 ```bash
-uv run python -m video_interpolation.cli ema export-onnx --device cpu --output-dir model_exports/onnx/stage2_5_task_2_5_dynamo --opset-version 18 --height 336 --width 560 --exporter dynamo --dynamic-hw-multiple 112 --artifact-stem ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560 --no-simplify
+uv run python -m video_interpolation.cli ema export-onnx --device cpu --output-dir model_exports/onnx --opset-version 18 --height 336 --width 560 --exporter dynamo --dynamic-hw-multiple 112 --artifact-stem ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560 --no-simplify
 ```
 
 The graph exposes constrained symbolic H/W:
@@ -1090,13 +1286,13 @@ intermediate_frame[batch, 3, 112*height_units, 112*width_units]
 Accepted divisor-112 validation:
 
 ```bash
-uv run python -m video_interpolation.cli ema validate-onnx --torch-device cpu --onnx-path model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx --provider cpu --shape 64x64 --shape 112x168 --shape 320x512 --divisor 112 --output-dir outputs/onnx_validation/stage2_5_task_2_5/dynamo_div112_h336w560
+uv run python -m video_interpolation.cli ema validate-onnx --torch-device cpu --onnx-path model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx --provider cpu --shape 64x64 --shape 112x168 --shape 320x512 --divisor 112 --output-dir outputs/onnx_validation/stage2_5_m3_smoke
 ```
 
-Report:
+Historical report:
 
 ```text
-outputs/onnx_validation/stage2_5_task_2_5/dynamo_div112_h336w560/ema_vfi_small/equivalence_report.json
+The Task 2.5 report directory was cleaned before Milestone 3; accepted metrics are preserved in this ExecPlan and `docs/stage2_5_inference_runtime_stabilization.md`.
 ```
 
 Result:
@@ -1109,7 +1305,7 @@ Result:
 Divisor-32 probe:
 
 ```text
-outputs/onnx_validation/stage2_5_task_2_5/dynamo_div32_h336w560/ema_vfi_small/equivalence_report.json
+The Task 2.5 divisor-32 probe directory was cleaned before Milestone 3.
 ```
 
 Result: failed in the expected window reshape path because divisor `32` produces padded shapes that are not multiples of `112`.
@@ -1138,6 +1334,8 @@ Serving implication:
 - Current ONNX validation artifacts are not all consistent with the Stage 2 handoff prose. Some current JSON files record `CUDAExecutionProvider` and larger Practical-RIFE differences, while the Stage 2 handoff described CPU-provider results with smaller errors. Stage 2.5 must rerun controlled checks and record provenance.
 - `pyproject.toml` already includes `bentoml` and `onnxscript`, in addition to ONNX and ONNX Runtime packages. Stage 2.5 should not add dependencies unless a concrete missing package appears.
 - `git status --short` shows existing generated/untracked `model_exports/` and `outputs/onnx_validation/`, plus a modified candidate validation report. These should be treated as user/workspace artifacts and left intact unless a Stage 2.5 workflow intentionally writes new outputs.
+- The old EMA Milestone 2 and Task 2.5 generated export/output directories were removed before Milestone 3; Practical-RIFE ONNX artifacts and existing Practical-RIFE validation outputs were kept for comparison.
+- Pre-Milestone-3 Practical-RIFE dynamo validation wrote `outputs/onnx_validation/stage2_5_pre_m3_rife_dynamo/practical_rife_v4_26/equivalence_report.json`: `128x128` passed strict allclose; `128x256` and `320x512` ran but failed strict allclose with max abs `0.0038332939` and `0.0087888837`.
 - Milestone 1 report audit found that existing ONNX validation reports lack first-class provenance for command, timestamp, Git revision, PyTorch device, export sample shape, input source type, RIFE scale, and artifact simplification status. Later report schema updates should add these fields before accepting ONNX serving decisions.
 - EMA's existing PyTorch inference path does not accept every `56`-multiple input when the external padder divisor is changed to `56`; `56x56` and `112x168` failed before ONNX with multiscale feature-size mismatches. The old divisor `32` behavior remains the safe PyTorch default.
 - `torch.onnx.export(..., dynamo=True, dynamic_shapes=...)` initially failed on EMA's symbolic shape cache keys. After cache fixes, export succeeded but the graph still baked H/W `112x112`, so export flags alone are not a dynamic-H/W fix.
@@ -1154,20 +1352,84 @@ Serving implication:
 - 2026-06-01: Prefer pair-by-timestep flattening for Nx batch inference. Rationale: the Stage 2.5 plan requires this over a Python loop over timesteps where feasible.
 - 2026-06-01: Keep sequential fallback as a first-class path. Rationale: low-VRAM environments, debugging, and regression checks need behavior that is close to the current implementation.
 - 2026-06-01: Integrate benchmarks with the existing MLflow helper layer. Rationale: Stage 1 already centralized MLflow setup, bounded connectivity behavior, params, metrics, and artifact logging.
+- 2026-06-01: Rewrite Milestone 8 benchmarks from synthetic/image-pair runtime calls to full video-pipeline benchmarks over `run_video_inference(...)`. Rationale: backend and batch differences are more meaningful on short videos, and the benchmark must expose decode, preprocessing, model, postprocessing, encode/flush, audio remux, and total pipeline bottlenecks while still reusing the existing Stage 2.5 inference workflow rather than adding a separate interpolation loop.
 - 2026-06-01: Classify EMA ONNX dynamic H/W as blocked/deferred after Milestone 2. Rationale: legacy dynamic-axes export fails at changed H/W, 56-multiple external padding fails, larger legacy trace-shape export is not equivalent, and modern dynamo export remains static-H/W. Superseded by the explicit Task 2.5 broader refactor trial below.
 - 2026-06-01: Keep EMA serving on PyTorch backend after Milestone 2. Rationale: PyTorch EMA inference remains valid with the existing divisor `32`, while ONNX was only static-like at that point. Superseded for constrained ONNX only by the Task 2.5 divisor-112 artifact; PyTorch remains the default-safe EMA path.
 - 2026-06-01: Accept EMA constrained-dynamic ONNX for the bounded divisor-112 policy after Task 2.5. Rationale: one dynamo opset-18 artifact with symbolic `112*height_units` and `112*width_units` ran in ORT on `64x64`, `112x168`, and `320x512` original inputs through project-owned padding/unpadding, with low PyTorch-vs-ONNX error. Divisor `32` still fails, so the result is constrained-dynamic, not fully dynamic.
+- 2026-06-01: Promote the accepted EMA constrained-dynamic artifact to `model_exports/onnx/ema_vfi_small/` and clean obsolete EMA investigation artifacts before Milestone 3. Rationale: Milestone 3 should validate current serving candidates, not old Milestone 2 or Task 2.5 trial directories; Practical-RIFE artifacts remain because Milestone 3 still needs their real-image equivalence evidence.
+- 2026-06-01: Make dynamo/opset 18/no-simplify the default ONNX export path for active models while retaining explicit legacy export and legacy simplification. Rationale: EMA's accepted artifact uses dynamo plus external data, and Practical-RIFE now has the same artifact format; legacy artifacts remain useful for comparison but should not drive the default pre-Milestone-3 path.
+- 2026-06-01: Represent true model batch inference with a new BCHW-only `ModelBatchRequest` rather than expanding `FramePairRequest`. Rationale: the existing sequential request supports CHW and NCHW compatibility, while the batch contract needs explicit multiple-pair semantics and must not be confused with directory-wide `batch_inference.py`.
+- 2026-06-01: Store Nx batch execution order as pair-major/timestep-minor and reconstruct outputs as `outputs[pair_index][timestep_index]`. Rationale: this directly matches the Stage 2.5 pair-by-timestep flattening requirement and gives video chunking/benchmark milestones deterministic ordering metadata.
+- 2026-06-01: Default PyTorch model-batch runtimes to one model call for the full flattened pair×timestep batch, with optional `inference_batch_size` chunking. Rationale: this proves true batch execution for Milestone 5 while keeping a direct memory-control escape hatch for later video and benchmark work.
+- 2026-06-01: Keep ONNX batch execution deferred after PyTorch batch runtime wiring. Rationale: Milestone 5 scope is PyTorch only; ONNX batch support depends on the provider/artifact acceptance work scheduled for a later milestone.
+- 2026-06-01: Force EMA `fast_tta` batch execution to effective batch size `1`. Rationale: upstream EMA fast-TTA inference indexes only two augmented predictions and would be incorrect for larger flattened model batches.
+- 2026-06-01: Recommend Practical-RIFE v4.26 PyTorch as the first Stage 2 BentoML compatibility-proof target. Rationale: it is the lowest-risk proof path after Stage 2.5 because it avoids EMA's ONNX divisor-112 constraint, avoids ONNX external-data/provider variables for the first service smoke, uses the active default model, and exercises the same request/result and batch-capable adapter surface that future service code should call.
+- 2026-06-01: Keep ONNX serving as an explicit secondary proof path for Stage 2 Milestone 8. Rationale: Practical-RIFE dynamic-batch ONNX is viable on CPU with real-pair evidence, but `.onnx.data` adjacency, provider choice, and CUDA validation remain deployment concerns; EMA ONNX is acceptable only when the service enforces external divisor `112` padding/unpadding.
 
 ## Outcomes & Handoff
 
-Not yet complete. This section must be updated at Stage 2.5 closeout with:
+Stage 2.5 Milestones 1 through 9 are complete and accepted. The ExecPlan has moved to `completed/`, and Stage 2 has resumed from Milestone 8.
 
-- what was implemented;
-- what was validated;
-- which ONNX paths are usable, blocked, or deferred;
-- benchmark results and artifact locations;
-- documentation updates;
-- remaining risks;
-- exact next steps for resuming Stage 2 Milestone 8.
+Implemented and validated:
 
-Until this section is completed and accepted, Stage 2 should remain paused before the BentoML compatibility proof.
+- ONNX export defaults now use dynamo/opset 18/no simplification for active models, with explicit legacy export and legacy-only simplification still available.
+- EMA-VFI-small has a promoted constrained-dynamic ONNX artifact at `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` plus adjacent `.onnx.data`.
+- Practical-RIFE v4.26 has a promoted dynamic-batch constrained-dynamic ONNX artifact at `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` plus adjacent `.onnx.data`.
+- Real-image ONNX-vs-PyTorch validation exists for `raw_data/pair_test/001..003` with per-pair visuals and CSV/JSON reports.
+- `ModelBatchRequest` / `ModelBatchResult` define true pair-major fixed 2x and Nx model batching, with EMA/RIFE PyTorch and viable ONNX runtimes supporting batched execution.
+- Local video inference supports default chunked `batched` execution and explicit `sequential` fallback. `inference_batch_size` caps flattened model rows for VRAM control.
+- `benchmark runtime` now benchmarks the complete local video pipeline using real videos, defaulting to `raw_data/tmp_test/DORA_cut.mp4`, and reports decode, preprocessing, model, postprocessing, encode/flush, audio remux, total time, throughput, counts, and generated output video paths.
+
+Final ONNX decisions:
+
+- EMA ONNX is accepted only as constrained-dynamic with project-owned external divisor `112` padding/unpadding. It is not fully dynamic; divisor `32` fails; no static artifact buckets were introduced. EMA PyTorch remains the general serving path when the service cannot enforce divisor `112`.
+- Practical-RIFE ONNX is accepted for CPU real-pair and dynamic-batch runtime use with the new dynamic-batch artifact. The old fixed-batch dynamo artifact is obsolete and unsupported. Larger synthetic shapes still show strict-allclose drift, so real-image and provider-specific evidence should stay visible in serving decisions.
+- Both accepted dynamo artifacts may require an adjacent `.onnx.data` file; service packaging must keep each external-data file next to its `.onnx` graph.
+- CUDA-provider ONNX acceptance remains deferred. CPU evidence must not be treated as CUDA evidence.
+
+PyTorch versus ONNX serving recommendation:
+
+- Use PyTorch first for the minimal BentoML compatibility proof, specifically Practical-RIFE v4.26 through the existing adapter/runtime API. This proves the service can import, instantiate, load weights, validate request parameters, and call the request/result path without ONNX external-data/provider variables.
+- Use Practical-RIFE dynamic-batch ONNX as the secondary BentoML proof if an ORT service path is included. Keep `.onnx.data` adjacent, request CPU provider first, and fail fast on fixed-batch artifacts.
+- Use EMA PyTorch for general EMA serving. Use EMA ONNX only in a route that explicitly applies external divisor `112` padding/unpadding and documents the resolution constraint.
+
+Batch inference status:
+
+- Fixed 2x batching uses one flattened row per neighboring frame pair at timestep `0.5`.
+- Nx batching uses pair-major `pair_index x timestep_index` flattening, then reconstructs `outputs[pair_index][timestep_index]`.
+- `predict_batch([(left, right), ...])` on EMA/RIFE adapters is fixed-2x and now uses true model batching. Nx batching uses `predict_frame_pairs_batch(ModelBatchRequest)` or the video batched path.
+- Sequential APIs remain available for debugging, low-memory operation, and models without batch support.
+
+Benchmark status:
+
+- Milestone 8 smoke used Practical-RIFE v4.26 ONNX, CPU provider, batched fixed 2x, `raw_data/tmp_test/DORA_cut.mp4`, and `--limit-pairs 2`.
+- Reports: `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/benchmark_report.json` and `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/benchmark_metrics.csv`.
+- Output video: `outputs/benchmarks/stage2_5_m8_video_rife_onnx_batch_smoke/videos/practical_rife_v4_26_onnx_cpu_batched_fixed_2x_2x_bauto/DORA_cut_repeat00_2x.mp4`.
+- Counts: source frames `3`, pairs `2`, generated frames `2`, frames written `5`, batch chunks `2`, model batch requests `2`.
+- Timings: decode `0.11354650s`, preprocessing `0.09657892s`, model `5.62656432s`, postprocessing `0.04529195s`, encode `0.10067545s`, audio remux `0.00034524s`, total `6.38277020s`.
+- MLflow server logging was not validated in this environment; the smoke used `--disable-mlflow`. The benchmark code keeps MLflow enabled by default and logs generated videos only with `--log-output-videos`.
+
+Documentation and project-map updates:
+
+- `docs/stage2_5_inference_runtime_stabilization.md` now records the final Stage 2.5 state, ONNX decisions, batch/video benchmark behavior, limitations, and Stage 2 resume recommendation.
+- `.agent/docs/PROJECT_MAP.md` now points to the Stage 2.5 closeout/handoff role and current artifact/report locations.
+- `.agent/docs/exec-plans/active/02_inference_runtime_refactor.execplan.md` now states that Stage 2 was paused for Stage 2.5, Stage 2.5 is complete, and Stage 2 should resume from Milestone 8 using these decisions.
+
+Unresolved blockers and deferred work:
+
+- CUDA-provider validation remains deferred for EMA/RIFE ONNX and benchmark profiles.
+- MLflow server connectivity/logging was not smoke-tested; report generation works with `--disable-mlflow`.
+- Practical-RIFE ONNX still has known synthetic larger-shape strict-allclose drift, despite passing current real-pair fixtures.
+- EMA ONNX remains constrained to divisor `112`; fully dynamic divisor-32 behavior is not available.
+- AMT-S runtime refactor/ONNX/batch support remains out of scope.
+- No BentoML compatibility proof, production service, FastAPI, Celery/Redis, PostgreSQL, MinIO orchestration, frontend, monitoring, or deployment work was implemented in Stage 2.5.
+
+Closeout validation:
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed after the Milestone 9 documentation closeout: `141 passed, 30 warnings`.
+- `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed after the Milestone 9 documentation closeout: `All checks passed`.
+- `git diff --check` passed after the Milestone 9 documentation closeout.
+
+Stage 2 resume note:
+
+Stage 2 resumed in `.agent/docs/exec-plans/active/02_inference_runtime_refactor.execplan.md` at Milestone 8. The accepted recommendation remains Practical-RIFE v4.26 PyTorch first, with Practical-RIFE dynamic-batch ONNX as a separate alternate proof path using the accepted artifact and adjacent `.onnx.data`.

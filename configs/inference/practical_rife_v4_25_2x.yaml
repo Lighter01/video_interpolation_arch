@@ -18,6 +18,8 @@ model:
 limit_pairs: null
 interpolation_mode: fixed_2x
 interpolation_factor: 2
+execution_mode: batched
+inference_batch_size: null
 output_fps_multiplier: 2.0
 
 # FFmpeg/PyAV encoder name.

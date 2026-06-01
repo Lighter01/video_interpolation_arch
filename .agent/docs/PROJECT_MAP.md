@@ -10,13 +10,14 @@ Compact repository index for coding agents. This file describes the current proj
 - `datasets/` — local datasets and prepared training data.
 - `dataset_versions/` — manifest-only dataset versions with train/val/test split CSVs and dataset config YAML.
 - `docs/` — human-facing workflow documentation.
+- `examples/` — developer-facing compatibility examples that are not part of the `video_interpolation` package.
 - `infra/` — local infrastructure definitions for Stage 1 services.
 - `model_repos/` — external VFI model repositories used as implementation references and integration targets.
 - `model_exports/` — generated model export artifacts such as Stage 2 ONNX exports; artifacts are runtime/developer outputs, not source model code.
 - `model_weights/` — pretrained model weights and model-specific checkpoint artifacts.
 - `outputs/` — generated local reports, predictions, inference videos, and validation artifacts.
-- `src/` — local Python package for Stage 1 ML core code.
-- `tests/` — focused tests for critical Stage 1 behavior plus Stage 2 inference runtime/export behavior.
+- `src/` — local Python package for ML core workflows, inference runtime, local video inference, benchmarks, and serving-readiness facade.
+- `tests/` — focused tests for critical Stage 1 behavior plus Stage 2/2.5 inference runtime, ONNX, benchmark, and serving-readiness behavior.
 
 ## `.agent/`
 
@@ -36,16 +37,28 @@ Agent-facing documentation and development logs.
 
 ### `.agent/docs/exec-plans/active/`
 
-- `02_inference_runtime_refactor.execplan.md` — active Stage 2 ExecPlan for inference runtime refactor, PyTorch/Nx serving readiness, ONNX feasibility/export/runtime where feasible, and minimal BentoML compatibility proof.
-- `02_5_inference_runtime_stabilization.execplan.md` — active Stage 2.5 ExecPlan for ONNX stabilization, real-image equivalence, true model batch inference, mini-benchmarks, and Stage 2 handoff readiness.
+- No active stage ExecPlan after Stage 2 closeout.
 
 ### `.agent/docs/exec-plans/completed/`
 
 - `01_ml_core_selected.execplan.md` — completed Stage 1 ML Core ExecPlan and handoff.
+- `02_inference_runtime_refactor.execplan.md` — completed Stage 2 ExecPlan covering the inference runtime refactor, Practical-RIFE v4.26 serving-readiness facade, BentoML examples, final serving recommendation, and backend/service handoff.
+- `02_5_inference_runtime_stabilization.execplan.md` — completed Stage 2.5 ExecPlan covering ONNX stabilization, real-image equivalence, true model batch inference, video-pipeline benchmarks, final serving recommendations, and accepted handoff back to Stage 2.
 
 ## `.agent/stage_plans/`
 
 Human-authored stage-level implementation plans.
+
+## `examples/`
+
+Developer-facing examples outside the installable package.
+
+### `examples/bentoml/`
+
+Minimal BentoML compatibility examples for Practical-RIFE v4.26 serving.
+
+- `practical_rife_torch_service/service.py` — recommended/default Practical-RIFE PyTorch service example using `backend="torch"`, `device="cuda"`, sequential arbitrary-Nx video inference, runtime factor `2..4`, and runtime scale.
+- `practical_rife_onnx_service/service.py` — alternate Practical-RIFE ONNX Runtime service example using `backend="onnx"`, `CUDAExecutionProvider`, the same sequential serving facade, and scale matching the loaded ONNX artifact.
 
 ## `raw_data/`
 
@@ -188,39 +201,55 @@ Generated model export artifacts.
 
 Stage 2 ONNX export output root. Export commands write model/version-oriented subdirectories such as `ema_vfi_small/` and `practical_rife_v4_26/` with original and optional simplified `.onnx` files.
 
-- `stage2_5_m2_export112/` — Milestone 2 EMA legacy dynamic-axes re-export probe at `112x112`; investigation artifact, not a preferred serving artifact.
-- `stage2_5_m2_dynamo_after_cache_patch/` — Milestone 2 EMA dynamo-export probe; static-H/W `112x112` investigation artifact with external data, not a preferred serving artifact.
-- `stage2_5_task_2_5_dynamo/` — Task 2.5 EMA dynamo-export trial artifacts, including accepted constrained-dynamic opset 18 artifact `ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` with symbolic `112*height_units` and `112*width_units`.
+- `ema_vfi_small/` — current EMA constrained-dynamic ONNX artifact `ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` plus external data, requiring project-owned external divisor `112` padding.
+- `practical_rife_v4_26/` — current Practical-RIFE v4.26 dynamo dynamic-batch constrained-dynamic ONNX artifact `practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` plus external data; the older fixed-batch dynamo artifact is obsolete, and legacy opset 17 original/simplified artifacts remain available for explicit comparison.
 
 ## `outputs/`
 
 Generated reports and local workflow artifacts.
 
+### `outputs/inference/`
+
+Local video inference output root for single-video, directory-wide, and smoke-run outputs.
+
+- `stage2_5_m6_smoke/` — Milestone 6 short CPU real-runtime video smoke outputs for EMA-VFI-small and Practical-RIFE v4.26 batched 2x/4x checks.
+
+### `outputs/benchmarks/`
+
+Stage 2.5 video benchmark output root. `benchmark runtime` runs the complete local video inference pipeline and writes `benchmark_report.json`, `benchmark_metrics.csv`, and generated videos under `videos/<profile>/`.
+
+- `stage2_5_m8_video_rife_onnx_batch_smoke/` — Milestone 8 CPU ONNX Practical-RIFE batched video-pipeline smoke report with MLflow disabled.
+
 ### `outputs/onnx_validation/`
 
-Stage 2 ONNX Runtime validation output root. `ema validate-onnx` and `rife validate-onnx` write per-model `equivalence_report.json`, `equivalence_metrics.csv`, and optional sample PyTorch/ONNX/difference PNGs for tensor mismatches.
+Stage 2 ONNX Runtime validation output root. `ema validate-onnx` and `rife validate-onnx` write synthetic per-model `equivalence_report.json`, `equivalence_metrics.csv`, and optional sample PyTorch/ONNX/difference PNGs for tensor mismatches. `ema validate-onnx-real` and `rife validate-onnx-real` write real-pair reports plus per-pair `left.png`, `right.png`, `pytorch_generated.png`, `onnx_generated.png`, and `absdiff.png`.
 
-- `stage2_5_m2/` — Milestone 2 EMA ONNX investigation reports for legacy dynamic failure, 56-multiple padding probes, larger legacy re-export, and modern dynamo-export probe.
-- `stage2_5_task_2_5/` — Task 2.5 EMA dynamic ONNX refactor trial artifacts: pre/post PyTorch identity tensors, accepted divisor-112 constrained-dynamic ORT validation report, failed divisor-32 probe, and pre-trial tracked diff snapshot.
+- Old EMA Milestone 2 and Task 2.5 output directories were cleaned before Milestone 3. Milestone 3 real-pair checks write to `stage2_5_m3_real_pairs/`.
+- Existing Practical-RIFE synthetic ONNX validation outputs remain available for Milestone 3 comparison and controlled reruns.
+- `stage2_5_pre_m3_rife_dynamo/` and `stage2_5_pre_m3_ema_dynamo_smoke/` — pre-Milestone-3 ONNX validation reports for the current Practical-RIFE and EMA dynamo artifacts.
+- `stage2_5_m3_real_pairs/` — Milestone 3 real-image ONNX-vs-PyTorch reports for EMA and Practical-RIFE under `<model>/<provider>/`, including CSV/JSON metrics and visual comparison artifacts.
+- `stage2_5_m7_5_rife_dynamic_batch_*` and `stage2_5_m7_5_ema_dynamic_batch_*` — Milestone 7.5 dynamic-batch ONNX validation reports for new Practical-RIFE and existing EMA artifacts, including fixed/Nx batch smoke JSON and RIFE real-pair rerun outputs.
 
 ## `src/video_interpolation/`
 
 Local Stage 1 Python package.
 
 - `adapters/` — shared model adapter interface plus EMA-VFI-small, AMT-S, Practical-RIFE, and non-neural baseline adapters.
-- `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, factor-aware output path layout, MLflow run naming, and per-target measurement CSV export including runtime options.
+- `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, factor-aware output path layout, MLflow run naming, and per-target measurement CSV export including runtime options plus video execution-mode/batch metadata.
 - `baselines.py` — duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
 - `amt_preflight.py` — lightweight AMT-S import/model/checkpoint compatibility check.
-- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, request-time Practical-RIFE scale options, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export and ONNX Runtime validation commands, EMA dynamo-export options (`--exporter`, `--dynamic-hw-multiple`, `--artifact-stem`) and EMA validation padding override (`--divisor`), EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
+- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, Stage 2.5 video-pipeline runtime benchmarks (`benchmark runtime`), request-time Practical-RIFE scale options, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export, synthetic ONNX Runtime validation, real-pair ONNX Runtime validation (`validate-onnx-real`), shared dynamo/legacy export options (`--exporter`, `--dynamic-hw-multiple`, `--artifact-stem`), legacy artifact-resolution flags, EMA validation padding override (`--divisor`), EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
 - `contracts.py` — compact artifact contracts and relative-path validation helpers.
 - `data/` — source preprocessing and source-level indexing code.
 - `ema_preflight.py` — lightweight EMA-VFI-small import/checkpoint compatibility check.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
-- `inference_runtime/` — Stage 2 request/result inference API, interpolation mode validation, runtime input/output containers, backend abstractions, ONNX export configuration including selectable legacy/dynamo exporters and constrained dynamic H/W multiples, and ONNX validation reports with graph I/O plus padded/output shape metadata.
-- `inference.py` — shared local video inference workflow using Stage 2 request/result calls when adapters support them, fixed 2x/arbitrary Nx frame interleaving for EMA/RIFE, request runtime options such as Practical-RIFE scale, PyAV/FFmpeg output encoding, audio remuxing, and legacy fixed-2x adapter fallback.
+- `inference_benchmark.py` — Stage 2.5 video-pipeline runtime benchmarks over `run_video_inference(...)`, with single-video or directory inputs, CSV/JSON reports, generated benchmark videos, timing breakdowns for decode/preprocess/model/postprocess/encode/audio remux, ONNX benchmark adapter wrappers, and optional aggregate MLflow logging.
+- `inference_runtime/` — Stage 2 request/result inference API, true model-batch API contracts, interpolation mode validation, runtime input/output containers, backend abstractions, ONNX export configuration including selectable legacy/dynamo exporters and constrained dynamic batch/H/W shapes, ONNX batch-request runtimes where viable, and ONNX validation reports with graph I/O plus padded/output shape metadata.
+- `inference.py` — shared local video inference workflow using Stage 2 request/result calls, chunked PyTorch model-batch video inference for EMA/RIFE through `ModelBatchRequest`, fixed 2x/arbitrary Nx frame interleaving, configurable `execution_mode` and `inference_batch_size`, request runtime options such as Practical-RIFE scale, PyAV/FFmpeg output encoding, audio remuxing, and sequential/legacy fallback.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
-- `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs.
+- `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs plus Stage 2.5 benchmark runs.
 - `rife_preflight.py` — lightweight Practical-RIFE import/model/checkpoint compatibility check.
+- `serving.py` — Practical-RIFE v4.26 serving-readiness facade with PyTorch CUDA defaults, ONNX alternative provider/artifact handling, sequential arbitrary-Nx factor `2..4` validation, persistent runner, convenience one-shot function, and ONNX video adapter wrapper.
 - `settings.py` — `pydantic-settings` runtime settings loaded from `.env`.
 - `training.py` — EMA-VFI-small fine-tuning and eval-only runner over triplet manifests.
 - `validation.py` — shared candidate validation metrics, reports, prediction samples, and threshold decisions for model adapters.
@@ -232,19 +261,19 @@ Stage 1 model adapter implementations.
 - `base.py` — common adapter interface and environment-report structures.
 - `amt.py` — AMT-S adapter using `model_repos/AMT`, upstream `cfgs/AMT-S.yaml`, and `model_weights/AMT/amt-s.pth`.
 - `baseline.py` — ModelAdapter-compatible wrapper for duplicate-left, blend, and Farneback baseline methods.
-- `ema_vfi.py` — EMA-VFI-small adapter using `model_repos/EMA-VFI` and explicit local checkpoints.
-- `rife.py` — Practical-RIFE adapter using project-owned runtime source and Practical-RIFE v4.26 weights by default, with v4.25 still available by config.
+- `ema_vfi.py` — EMA-VFI-small adapter using `model_repos/EMA-VFI` and explicit local checkpoints, with sequential pair APIs plus true PyTorch model-batch wrapper support through `ModelBatchRequest`.
+- `rife.py` — Practical-RIFE adapter using project-owned runtime source and Practical-RIFE v4.26 weights by default, with v4.25 still available by config, sequential pair APIs, and true PyTorch model-batch wrapper support through `ModelBatchRequest`.
 
 ### `src/video_interpolation/inference_runtime/`
 
 Stage 2 inference runtime subsystem.
 
-- `api.py` — `InferenceMode`, `RuntimeBackendKind`, request/result dataclasses, runtime input/output containers, interpolation-factor validation, and timestep generation.
+- `api.py` — `InferenceMode`, `RuntimeBackendKind`, sequential frame-pair request/result dataclasses, true model-batch request/result dataclasses with pair-major pair×timestep flattening and `outputs[pair_index][timestep_index]` reconstruction, runtime input/output containers, interpolation-factor validation, and timestep generation.
 - `backends/` — shared runtime backend lifecycle/execution abstractions, callable-based PyTorch backend skeleton, and ONNX Runtime backend/session wrapper.
-- `ema.py` — prediction-only EMA-VFI PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API.
+- `ema.py` — prediction-only EMA-VFI PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API; PyTorch and viable constrained-dynamic ONNX runtime paths support true model-batch execution with pair-major pair×timestep flattening and optional `inference_batch_size`.
 - `onnx_export.py` — ONNX export config/results, EMA and Practical-RIFE neural-core wrapper modules, dynamic/static shape export helpers, ONNX checker validation, and optional simplification.
-- `onnx_validation.py` — ONNX artifact resolution, PyTorch-vs-ONNX tensor equivalence metrics, report writing, and sample image/difference output helpers.
-- `rife.py` — prediction-only Practical-RIFE PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API.
+- `onnx_validation.py` — ONNX artifact resolution, synthetic and real image-pair PyTorch-vs-ONNX equivalence checks, tensor/image metrics including MAE/max/MSE/PSNR/SSIM, report writing, pair discovery/loading, and sample image/difference output helpers.
+- `rife.py` — prediction-only Practical-RIFE PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API; PyTorch and accepted dynamic-batch ONNX runtime paths support true model-batch execution, and the ONNX runtime rejects fixed-batch artifacts instead of adding static-batch fallback support.
 - `rife_upstream/` — project-owned Practical-RIFE v4.26 runtime source copied from the local `train_log` code and patched for stable imports/device-aware warping.
 
 ### `src/video_interpolation/data/`
@@ -277,9 +306,9 @@ Stage 1 YAML config layout and implemented workflow configs.
 - `inference/practical_rife_v4_25_2x.yaml` — alternative Practical-RIFE v4.25 fixed 2x video inference config with runtime mode/factor fields.
 - `models/README.md` — operational field reference for model adapter configs.
 - `models/amt_s.yaml` — AMT-S adapter/checkpoint/device/config settings.
-- `models/ema_vfi_small.yaml` — EMA-VFI-small adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields; Stage 2 inference points at `ours_small_t.pkl`.
-- `models/practical_rife_v4_26.yaml` — Practical-RIFE v4.26 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields.
-- `models/practical_rife_v4_25.yaml` — alternative Practical-RIFE v4.25 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields.
+- `models/ema_vfi_small.yaml` — EMA-VFI-small adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields and optional `inference_batch_size`; Stage 2 inference points at `ours_small_t.pkl`.
+- `models/practical_rife_v4_26.yaml` — Practical-RIFE v4.26 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields and optional `inference_batch_size`.
+- `models/practical_rife_v4_25.yaml` — alternative Practical-RIFE v4.25 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields and optional `inference_batch_size`.
 - `training/README.md` — operational field reference for EMA fine-tuning config.
 - `training/ema_vfi_small_finetune.yaml` — EMA-VFI-small fine-tuning and eval-only runner config.
 - `validation/README.md` — operational field reference for EMA, AMT, and Practical-RIFE candidate validation configs.
@@ -305,23 +334,24 @@ Stage 1 MLflow infrastructure with PostgreSQL metadata storage and MinIO artifac
 Human-facing project documentation.
 
 - `stage1_ml_core.md` — Stage 1 workflow notes for current implemented milestones.
-- `stage2_inference_runtime_refactor.md` — Stage 2 runtime API, local fixed 2x/Nx video inference behavior, request-time Practical-RIFE scale policy, backend boundaries, Practical-RIFE source policy, ONNX export/runtime validation status, and current BentoML deferrals.
-- `stage2_5_inference_runtime_stabilization.md` — concise Stage 2.5 baseline notes for current ONNX artifacts, validation outputs, real-image/video smoke inputs, and batch terminology before stabilization work.
+- `stage2_inference_runtime_refactor.md` — final Stage 2 handoff covering runtime structure, Practical-RIFE v4.26 PyTorch CUDA serving recommendation, ONNX Runtime CUDA alternative, BentoML example paths, local fixed 2x/Nx video inference behavior, backend boundaries, and backend/service developer next steps.
+- `stage2_5_inference_runtime_stabilization.md` — Stage 2.5 final accepted status and handoff notes for accepted ONNX artifacts, real-image equivalence, batch/video inference, video-pipeline benchmarks, serving recommendations, and known limitations.
 
 ## `tests/`
 
 Focused behavior tests.
 
 - `test_contracts.py` — compact artifact contract and relative path validation tests.
+- `test_serving.py` — Practical-RIFE serving facade validation, fake-video serving smoke tests, persistent runner checks, and BentoML example import/default checks.
 - `test_amt_adapter.py` — AMT adapter prediction and shared config parsing tests.
 - `test_datasets_metrics_baselines.py` — triplet dataset loading, metric sanity, and baseline evaluation smoke tests.
-- `test_ema_adapter.py` — EMA-VFI runtime request/result behavior, adapter wrapper compatibility, training-path isolation, and checkpoint normalization tests.
+- `test_ema_adapter.py` — EMA-VFI runtime request/result behavior, PyTorch model-batch ordering/chunking, adapter wrapper compatibility, training-path isolation, and checkpoint normalization tests.
 - `test_indexing.py` — Vimeo source-index generation tests.
-- `test_inference.py` — local inference config resolution, PyAV writer smoke tests, video-level request/result Nx frame ordering/count/FPS tests, and batch measurement metadata tests.
-- `test_inference_runtime_api.py` — Stage 2 request/result API validation, timestep generation, and backend skeleton tests.
+- `test_inference.py` — local inference config resolution, PyAV writer smoke tests, video-level request/result Nx frame ordering/count/FPS tests, chunked batch overlap/ordering/fallback tests, and batch measurement metadata tests.
+- `test_inference_runtime_api.py` — Stage 2 sequential and model-batch request/result API validation, timestep generation, pair×timestep flattening/reconstruction contract tests, and backend skeleton tests.
 - `test_onnx_export.py` — Stage 2 ONNX export config/path validation, neural-core wrapper behavior, artifact writing, and export failure reporting tests.
-- `test_onnx_runtime.py` — Stage 2 ONNX Runtime backend/provider validation, artifact resolution, tiny-session execution, model-specific ONNX runtime behavior, equivalence metrics, and report writing tests.
+- `test_onnx_runtime.py` — Stage 2 ONNX Runtime backend/provider validation, artifact resolution, tiny-session execution, model-specific ONNX runtime behavior, ONNX batch-request ordering/reconstruction tests, equivalence metrics, and report writing tests.
 - `test_preprocessing.py` — scene-safe sampling, quota termination, frame-step validation, and static-triplet filtering tests.
-- `test_rife_adapter.py` — Practical-RIFE runtime request/result behavior, adapter wrapper compatibility, padding, checkpoint normalization, and config parsing tests.
+- `test_rife_adapter.py` — Practical-RIFE runtime request/result behavior, PyTorch model-batch ordering/chunking, adapter wrapper compatibility, padding, checkpoint normalization, and config parsing tests.
 - `test_validation_and_adapters.py` — candidate validation decision logic and prediction artifact smoke tests with a fake adapter.
 - `test_versioning.py` — global index and dataset-version split/manifest generation tests.

@@ -38,7 +38,7 @@ EMA training/fine-tuning remains fixed 2x and keeps the training-compatible `our
 
 See the README files in those directories for field references and safe smoke guidance.
 
-See `inference/README.md` for single-video inference configs and the `infer-all-videos --input-dir ...` directory-wide wrapper. Local model video inference uses the Stage 2 request/result runtime API for EMA-VFI and Practical-RIFE, writes generated frames in timestep order, and sets output FPS to `input_fps * interpolation_factor`. Practical-RIFE scale can also be supplied per request/CLI call for high-resolution inputs.
+See `inference/README.md` for single-video inference configs and the `infer-all-videos --input-dir ...` directory-wide wrapper. Local model video inference uses the Stage 2 request/result runtime API for EMA-VFI and Practical-RIFE, writes generated frames in timestep order, and sets output FPS to `input_fps * interpolation_factor`. EMA-VFI and Practical-RIFE can also use chunked PyTorch model-batch video inference through `execution_mode: batched` and `inference_batch_size`; `execution_mode: sequential` remains available for debugging and low-VRAM fallback. Practical-RIFE scale can also be supplied per request/CLI call for high-resolution inputs.
 
 Stage 2 ONNX export is exposed through developer commands that use `models/` configs:
 
@@ -47,7 +47,7 @@ uv run python -m video_interpolation.cli ema export-onnx --config configs/models
 uv run python -m video_interpolation.cli rife export-onnx --config configs/models/practical_rife_v4_26.yaml
 ```
 
-Exports write neural-core artifacts under `model_exports/onnx/`; local video decoding, padding policy, timestep loops, frame interleaving, and encoding stay outside ONNX.
+Exports write neural-core artifacts under `model_exports/onnx/`; local video decoding, padding policy, timestep loops, frame interleaving, and encoding stay outside ONNX. Dynamo export is the default (`--exporter dynamo`, opset 18, no simplification), while legacy export remains available with `--exporter legacy`; ONNX simplification is supported only for legacy exports via `--simplify`.
 ONNX Runtime equivalence checks use the same `models/` configs and write reports under `outputs/onnx_validation/`:
 
 ```bash

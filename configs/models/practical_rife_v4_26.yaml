@@ -11,4 +11,5 @@ device: cuda
 timestep: 0.5
 scale: 1.0
 divisor: 128
+inference_batch_size:
 strict_checkpoint: false

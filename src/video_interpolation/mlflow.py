@@ -105,6 +105,24 @@ def log_stage1_run(
         ) from exc
 
 
+def log_benchmark_run(
+    config: MlflowRunConfig,
+    *,
+    params: Mapping[str, Any],
+    metrics: Mapping[str, float] | None = None,
+    artifact_paths: Sequence[Path] = (),
+    settings: Settings | None = None,
+) -> str | None:
+    """Log a benchmark run through the same bounded MLflow behavior as Stage 1 workflows."""
+    return log_stage1_run(
+        config,
+        params=params,
+        metrics=metrics,
+        artifact_paths=artifact_paths,
+        settings=settings,
+    )
+
+
 def run_mlflow_smoke(
     config: MlflowRunConfig,
     artifact_path: Path,

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from video_interpolation.adapters.ema_vfi import EMAVFIAdapter, EMAVFIAdapterConfig
-from video_interpolation.inference_runtime import FramePairRequest, InferenceMode
+from video_interpolation.inference_runtime import FramePairRequest, InferenceMode, ModelBatchRequest
 from video_interpolation.inference_runtime.ema import EMAVFIPyTorchRuntime, EMAVFIPyTorchRuntimeConfig
 
 
@@ -69,6 +69,66 @@ def test_ema_runtime_predicts_arbitrary_nx_frames_from_request_factor() -> None:
     assert all(call["grad_enabled"] is False for call in model.inference_calls)
 
 
+def test_ema_runtime_predicts_fixed_2x_model_batch_in_one_call() -> None:
+    model = _AverageEMAModel()
+    runtime = EMAVFIPyTorchRuntime(model, _NoOpPadder, EMAVFIPyTorchRuntimeConfig(device="cpu", divisor=8))
+    runtime.load()
+    left = torch.stack((torch.full((3, 5, 7), 0.0), torch.full((3, 5, 7), 0.2)), dim=0)
+    right = torch.stack((torch.full((3, 5, 7), 0.4), torch.full((3, 5, 7), 0.8)), dim=0)
+
+    result = runtime.predict_batch(ModelBatchRequest(left=left, right=right))
+
+    assert result.outputs[0][0].shape == (3, 5, 7)
+    assert torch.allclose(result.outputs[0][0], torch.full((3, 5, 7), 0.2))
+    assert torch.allclose(result.outputs[1][0], torch.full((3, 5, 7), 0.5))
+    assert [frame.mean().item() for frame in result.middle_frames] == pytest.approx([0.2, 0.5])
+    assert result.metadata["model_call_count"] == 1
+    assert result.metadata["flattening_order"] == "pair_major_timestep_minor"
+    assert model.inference_call_count == 1
+    assert model.inference_calls[0]["left_shape"] == (2, 3, 5, 7)
+    assert _timestep_values(model.inference_calls[0]["timestep"]) == [0.5, 0.5]
+
+
+def test_ema_runtime_predicts_nx_model_batch_pair_major_timestep_order() -> None:
+    model = _AverageEMAModel()
+    runtime = EMAVFIPyTorchRuntime(model, _NoOpPadder, EMAVFIPyTorchRuntimeConfig(device="cpu", divisor=8))
+    runtime.load()
+    left = torch.stack((torch.zeros(3, 5, 7), torch.full((3, 5, 7), 0.2)), dim=0)
+    right = torch.stack((torch.ones(3, 5, 7), torch.full((3, 5, 7), 0.6)), dim=0)
+
+    result = runtime.predict_batch(
+        ModelBatchRequest(left=left, right=right, mode=InferenceMode.ARBITRARY_NX, interpolation_factor=4)
+    )
+
+    assert result.timesteps == (0.25, 0.5, 0.75)
+    assert [frame.mean().item() for frame in result.flattened_outputs] == pytest.approx(
+        [0.25, 0.5, 0.75, 0.3, 0.4, 0.5]
+    )
+    assert result.metadata["model_call_count"] == 1
+    assert model.inference_call_count == 1
+    assert model.inference_calls[0]["left_shape"] == (6, 3, 5, 7)
+    assert _timestep_values(model.inference_calls[0]["timestep"]) == [0.25, 0.5, 0.75, 0.25, 0.5, 0.75]
+
+
+def test_ema_runtime_batch_respects_effective_batch_size_override() -> None:
+    model = _AverageEMAModel()
+    runtime = EMAVFIPyTorchRuntime(model, _NoOpPadder, EMAVFIPyTorchRuntimeConfig(device="cpu", divisor=8))
+    runtime.load()
+    request = ModelBatchRequest(
+        left=torch.zeros(2, 3, 5, 7),
+        right=torch.ones(2, 3, 5, 7),
+        mode="arbitrary_nx",
+        interpolation_factor=4,
+        backend_options={"inference_batch_size": 2},
+    )
+
+    result = runtime.predict_batch(request)
+
+    assert result.metadata["effective_batch_size"] == 2
+    assert result.metadata["model_call_count"] == 3
+    assert [call["left_shape"][0] for call in model.inference_calls] == [2, 2, 2]
+
+
 def test_ema_adapter_prediction_methods_remain_wrappers_over_runtime() -> None:
     adapter = EMAVFIAdapter(EMAVFIAdapterConfig(device="cpu", divisor=8))
     adapter._model = _AverageEMAModel()
@@ -87,6 +147,25 @@ def test_ema_adapter_prediction_methods_remain_wrappers_over_runtime() -> None:
     assert torch.allclose(call_prediction, pair_prediction)
     assert adapter._runtime is not None
     assert adapter._model.inference_call_count == 4
+
+
+def test_ema_adapter_predict_frame_pairs_batch_wraps_runtime_batch_api() -> None:
+    adapter = EMAVFIAdapter(EMAVFIAdapterConfig(device="cpu", divisor=8))
+    adapter._model = _AverageEMAModel()
+    adapter._input_padder_cls = _NoOpPadder
+    request = ModelBatchRequest(
+        left=torch.stack((torch.zeros(3, 5, 7), torch.full((3, 5, 7), 0.2)), dim=0),
+        right=torch.stack((torch.ones(3, 5, 7), torch.full((3, 5, 7), 0.6)), dim=0),
+        mode="arbitrary_nx",
+        interpolation_factor=4,
+    )
+
+    result = adapter.predict_frame_pairs_batch(request)
+
+    assert [frame.mean().item() for frame in result.flattened_outputs] == pytest.approx(
+        [0.25, 0.5, 0.75, 0.3, 0.4, 0.5]
+    )
+    assert adapter._model.inference_call_count == 1
 
 
 def test_ema_adapter_predict_intermediate_frames_uses_arbitrary_nx_request() -> None:
@@ -119,6 +198,7 @@ def test_ema_config_keeps_inference_and_training_checkpoint_policy_separate() ->
             "inference_checkpoint_path": "EMA-VFI/ours_small_t.pkl",
             "training_checkpoint_path": "EMA-VFI/ours_small.pkl",
             "supported_modes": ["fixed_2x", "arbitrary_nx"],
+            "inference_batch_size": 4,
         }
     )
 
@@ -126,6 +206,7 @@ def test_ema_config_keeps_inference_and_training_checkpoint_policy_separate() ->
     assert config.inference_checkpoint_path.name == "ours_small_t.pkl"
     assert config.training_checkpoint_path.name == "ours_small.pkl"
     assert config.supported_modes == ("fixed_2x", "arbitrary_nx")
+    assert config.inference_batch_size == 4
 
 
 def test_ema_adapter_train_and_eval_steps_stay_on_training_model_path() -> None:
@@ -187,6 +268,12 @@ class _AverageEMAModel:
             }
         )
         return torch.clamp(img0 * (1.0 - timestep) + img1 * timestep, 0.0, 1.0)
+
+
+def _timestep_values(value) -> list[float]:
+    if isinstance(value, torch.Tensor):
+        return [float(item) for item in value.detach().cpu().reshape(-1)]
+    return [float(value)]
 
 
 class _TrainingEMAModel:

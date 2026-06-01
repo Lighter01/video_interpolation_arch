@@ -22,6 +22,7 @@ Fields:
 | `tta` | boolean | default `false` for `ours_small_t` | Enables upstream test-time augmentation during pair inference |
 | `fast_tta` | boolean | default `false` for `ours_small_t` | Enables upstream fast TTA path |
 | `divisor` | integer | default `32` | Input padding divisor before EMA inference |
+| `inference_batch_size` | integer or null | default `null` | Optional cap on flattened model-batch rows per PyTorch batch call; `null` runs the full flattened pair×timestep batch at once |
 | `strict_checkpoint` | boolean | default `true` | Uses strict PyTorch state-dict loading |
 
 Operational notes:
@@ -32,6 +33,7 @@ Operational notes:
 - `tta` means test-time augmentation: the adapter also runs an augmented/flipped inference path and averages predictions. It can improve quality in some cases but increases runtime and GPU memory use.
 - `fast_tta` is EMA-VFI's faster test-time augmentation path. It is still extra inference work, but cheaper than full TTA. The config field is `fast_tta`.
 - `divisor` controls padding before EMA inference/training updates. EMA expects dimensions divisible by this value; the adapter pads inputs and unpads predictions back to the original size.
+- `inference_batch_size` applies only to true model-batch PyTorch inference. Keep it empty/null to run all flattened pair×timestep rows in one model call, or set a positive integer to split large batches for memory control. EMA `fast_tta` forces effective batch size `1` for correctness with the upstream fast-TTA implementation.
 - `strict_checkpoint` is passed to PyTorch state-dict loading. Keep it `true` for expected EMA-VFI-small checkpoints so missing or unexpected weights fail clearly.
 - The adapter check does not write files:
 
@@ -52,9 +54,13 @@ uv run python -m video_interpolation.cli ema infer-pair --interpolation-factor 4
 uv run python -m video_interpolation.cli ema export-onnx \
   --config configs/models/ema_vfi_small.yaml \
   --device cpu \
-  --height 32 \
-  --width 32 \
-  --output-dir model_exports/onnx
+  --exporter dynamo \
+  --opset-version 18 \
+  --dynamic-hw-multiple 112 \
+  --height 336 \
+  --width 560 \
+  --artifact-stem ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560 \
+  --no-simplify
 ```
 
 - ONNX Runtime equivalence validation command:
@@ -120,6 +126,7 @@ Fields:
 | `timestep` | float | default `0.5` | Interpolation time between left and right frames; Stage 1 uses middle-frame 2x interpolation |
 | `scale` | float | default `1.0` | Default Practical-RIFE scale fallback when no request/CLI scale is supplied |
 | `divisor` | integer | default `128` | Input padding divisor before Practical-RIFE inference |
+| `inference_batch_size` | integer or null | default `null` | Optional cap on flattened model-batch rows per PyTorch batch call; `null` runs the full flattened pair×timestep batch at once |
 | `strict_checkpoint` | boolean | default `false` | Non-strict loading accepts extra teacher/training keys present in the shipped v4.25 `flownet.pkl` |
 
 Operational notes:
@@ -129,6 +136,7 @@ Operational notes:
 - Fixed 2x is the `interpolation_factor=2`, `t=0.5` case. Arbitrary Nx uses direct request timesteps from the caller-provided factor. Local video inference writes generated frames in timestep order and sets output FPS to `input_fps * interpolation_factor`.
 - Practical-RIFE does not use one config per factor. Pass the concrete factor at request/CLI time, for example `--interpolation-factor 4`.
 - Practical-RIFE scale is also request-time controllable through `FramePairRequest.backend_options`, `rife infer-pair --scale`, `rife infer-video --scale`, or `infer-all-videos --rife-scale`. Valid values match upstream: `0.25`, `0.5`, `1.0`, `2.0`, and `4.0`; upstream recommends `0.5` for high-resolution inputs such as 4K.
+- `inference_batch_size` applies only to true model-batch PyTorch inference. Keep it empty/null to run all flattened pair×timestep rows in one model call, or set a positive integer to split large batches for memory control.
 - `strict_checkpoint` defaults to `false` because the local checkpoints contain teacher/caltime training keys that are not used by the inference network.
 - Practical-RIFE Python runtime source is no longer imported from `model_weights/.../train_log`.
 - Practical-RIFE upstream training is not manifest-ready in Milestone 9; eval-only/candidate validation and local video inference are implemented first.
@@ -157,10 +165,14 @@ ONNX neural-core export command:
 uv run python -m video_interpolation.cli rife export-onnx \
   --config configs/models/practical_rife_v4_26.yaml \
   --device cpu \
-  --height 128 \
-  --width 128 \
+  --exporter dynamo \
+  --opset-version 18 \
+  --dynamic-hw-multiple 128 \
+  --height 384 \
+  --width 512 \
   --scale 1.0 \
-  --output-dir model_exports/onnx
+  --artifact-stem practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512 \
+  --no-simplify
 ```
 
 ONNX Runtime equivalence validation command:
@@ -172,7 +184,7 @@ uv run python -m video_interpolation.cli rife validate-onnx \
   --shape 128x128
 ```
 
-ONNX export writes artifacts under `model_exports/onnx/<model_name>/`, attempts dynamic height/width export by default, and runs ONNX simplification unless `--no-simplify` is passed. Export targets only the neural core; video I/O, padding/unpadding policy, timestep loops, and frame interleaving remain outside ONNX.
+ONNX export writes artifacts under `model_exports/onnx/<model_name>/`, uses dynamo dynamic height/width export by default, and does not simplify by default. Legacy export remains available with `--exporter legacy`; ONNX simplification is supported only for legacy exports with `--simplify`. Export targets only the neural core; video I/O, padding/unpadding policy, timestep loops, and frame interleaving remain outside ONNX.
 ONNX Runtime validation compares PyTorch and ONNX-generated intermediate tensors with `atol=1e-3` and `rtol=1e-3`, writes `equivalence_report.json` plus `equivalence_metrics.csv` under `outputs/onnx_validation/`, and writes sample PyTorch/ONNX/difference PNGs when tensor `allclose` fails.
 
 ## `practical_rife_v4_25.yaml`

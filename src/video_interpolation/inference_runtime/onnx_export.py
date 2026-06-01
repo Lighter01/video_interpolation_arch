@@ -11,7 +11,7 @@ import torch
 from video_interpolation.inference_runtime.rife import validate_rife_scale
 
 DEFAULT_ONNX_EXPORT_ROOT = Path("model_exports/onnx")
-DEFAULT_ONNX_OPSET_VERSION = 17
+DEFAULT_ONNX_OPSET_VERSION = 18
 ONNX_INPUT_NAMES = ("left", "right", "timestep")
 ONNX_OUTPUT_NAMES = ("intermediate_frame",)
 
@@ -54,11 +54,11 @@ class OnnxExportConfig:
     sample_input_shape: tuple[int, int, int, int] = (1, 3, 32, 32)
     opset_version: int = DEFAULT_ONNX_OPSET_VERSION
     shape_mode: OnnxShapeMode | str = OnnxShapeMode.DYNAMIC_HW
-    exporter: OnnxExporterKind | str = OnnxExporterKind.LEGACY
+    exporter: OnnxExporterKind | str = OnnxExporterKind.DYNAMO
     dynamic_hw_multiple: int | None = None
     device: str | torch.device = "cpu"
     timestep: float = 0.5
-    simplify: bool = True
+    simplify: bool = False
     artifact_stem: str | None = None
 
     def __post_init__(self) -> None:
@@ -71,8 +71,11 @@ class OnnxExportConfig:
         object.__setattr__(self, "dynamic_hw_multiple", _validate_optional_positive_int(self.dynamic_hw_multiple, "dynamic_hw_multiple"))
         object.__setattr__(self, "device", torch.device(self.device))
         object.__setattr__(self, "timestep", _validate_timestep(self.timestep))
+        object.__setattr__(self, "simplify", _validate_bool(self.simplify, "simplify"))
         if self.artifact_stem is not None:
             object.__setattr__(self, "artifact_stem", _validate_artifact_name(self.artifact_stem, "artifact_stem"))
+        if self.exporter is OnnxExporterKind.DYNAMO and self.simplify:
+            raise OnnxExportValidationError("ONNX simplification is supported only with the legacy exporter.")
 
 
 @dataclass(frozen=True)
@@ -137,12 +140,31 @@ class PracticalRIFEOnnxWrapper(torch.nn.Module):
 
 def resolve_onnx_artifact_paths(config: OnnxExportConfig) -> OnnxArtifactPaths:
     model_dir = config.output_dir / config.model_name
-    stem = config.artifact_stem or f"{config.model_name}_{config.shape_mode.value}_opset{config.opset_version}"
+    stem = config.artifact_stem or default_onnx_artifact_stem(
+        config.model_name,
+        shape_mode=config.shape_mode,
+        opset_version=config.opset_version,
+        exporter=config.exporter,
+    )
     return OnnxArtifactPaths(
         output_dir=model_dir,
         original_path=model_dir / f"{stem}.onnx",
         simplified_path=model_dir / f"{stem}.simplified.onnx",
     )
+
+
+def default_onnx_artifact_stem(
+    model_name: str,
+    *,
+    shape_mode: OnnxShapeMode | str,
+    opset_version: int,
+    exporter: OnnxExporterKind | str,
+) -> str:
+    resolved_shape_mode = _coerce_shape_mode(shape_mode)
+    resolved_exporter = _coerce_exporter_kind(exporter)
+    if resolved_exporter is OnnxExporterKind.DYNAMO:
+        return f"{model_name}_{resolved_exporter.value}_{resolved_shape_mode.value}_opset{opset_version}"
+    return f"{model_name}_{resolved_shape_mode.value}_opset{opset_version}"
 
 
 def dynamic_axes_for_config(config: OnnxExportConfig) -> Mapping[str, Mapping[int, str]] | None:
@@ -413,6 +435,12 @@ def _validate_timestep(timestep: object) -> float:
     if not 0.0 < resolved < 1.0:
         raise OnnxExportValidationError("timestep must be strictly inside the open interval (0, 1).")
     return resolved
+
+
+def _validate_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise OnnxExportValidationError(f"{label} must be a boolean.")
+    return value
 
 
 def _coerce_shape_mode(shape_mode: OnnxShapeMode | str) -> OnnxShapeMode:

@@ -49,6 +49,8 @@ class OnnxRuntimeBackend(RuntimeBackend):
         self._session: Any | None = None
         self._input_names: tuple[str, ...] = ()
         self._output_names: tuple[str, ...] = ()
+        self._input_shapes: dict[str, tuple[int | str | None, ...]] = {}
+        self._output_shapes: dict[str, tuple[int | str | None, ...]] = {}
         self._session_providers: tuple[str, ...] = ()
 
     @property
@@ -67,6 +69,14 @@ class OnnxRuntimeBackend(RuntimeBackend):
     def output_names(self) -> tuple[str, ...]:
         return self._output_names
 
+    @property
+    def input_shapes(self) -> dict[str, tuple[int | str | None, ...]]:
+        return dict(self._input_shapes)
+
+    @property
+    def output_shapes(self) -> dict[str, tuple[int | str | None, ...]]:
+        return dict(self._output_shapes)
+
     def load(self) -> None:
         if not self.config.artifact_path.is_file():
             raise RuntimeBackendError(f"ONNX model does not exist: {self.config.artifact_path}")
@@ -81,8 +91,12 @@ class OnnxRuntimeBackend(RuntimeBackend):
             ) from exc
 
         self._session = session
-        self._input_names = tuple(input_meta.name for input_meta in session.get_inputs())
-        self._output_names = tuple(output_meta.name for output_meta in session.get_outputs())
+        input_metas = tuple(session.get_inputs())
+        output_metas = tuple(session.get_outputs())
+        self._input_names = tuple(input_meta.name for input_meta in input_metas)
+        self._output_names = tuple(output_meta.name for output_meta in output_metas)
+        self._input_shapes = {input_meta.name: _normalise_meta_shape(input_meta.shape) for input_meta in input_metas}
+        self._output_shapes = {output_meta.name: _normalise_meta_shape(output_meta.shape) for output_meta in output_metas}
         self._session_providers = tuple(session.get_providers())
         _require_names(self.config.input_names, self._input_names, "input", self.config.artifact_path)
         _require_names(self.config.output_names, self._output_names, "output", self.config.artifact_path)
@@ -119,6 +133,8 @@ class OnnxRuntimeBackend(RuntimeBackend):
                 "artifact_path": str(self.config.artifact_path),
                 "requested_providers": self.config.providers,
                 "session_providers": self._session_providers,
+                "input_shapes": self.input_shapes,
+                "output_shapes": self.output_shapes,
             },
         )
 
@@ -126,6 +142,8 @@ class OnnxRuntimeBackend(RuntimeBackend):
         self._session = None
         self._input_names = ()
         self._output_names = ()
+        self._input_shapes = {}
+        self._output_shapes = {}
         self._session_providers = ()
 
 
@@ -160,6 +178,16 @@ def _tensor_to_ort_array(tensor: torch.Tensor, name: str) -> np.ndarray:
     if tensor.dtype not in (torch.float16, torch.float32, torch.float64):
         raise RuntimeBackendError(f"ONNX input {name!r} must be floating point, got dtype={tensor.dtype}.")
     return tensor.detach().cpu().contiguous().numpy().astype(np.float32, copy=False)
+
+
+def _normalise_meta_shape(shape: Sequence[Any]) -> tuple[int | str | None, ...]:
+    dims: list[int | str | None] = []
+    for dim in shape:
+        if dim is None or isinstance(dim, int | str):
+            dims.append(dim)
+        else:
+            dims.append(str(dim))
+    return tuple(dims)
 
 
 def _normalise_providers(providers: Sequence[str] | str) -> tuple[str, ...]:

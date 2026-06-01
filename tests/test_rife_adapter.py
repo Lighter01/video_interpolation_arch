@@ -8,7 +8,7 @@ from video_interpolation.adapters.rife import (
     PracticalRIFEAdapterConfig,
     _normalise_rife_state_dict,
 )
-from video_interpolation.inference_runtime import FramePairRequest, InferenceMode
+from video_interpolation.inference_runtime import FramePairRequest, InferenceMode, ModelBatchRequest
 from video_interpolation.inference_runtime.rife import (
     PracticalRIFEPyTorchRuntime,
     PracticalRIFEPyTorchRuntimeConfig,
@@ -133,6 +133,71 @@ def test_rife_runtime_predicts_arbitrary_nx_frames_from_request_factor() -> None
     assert all(call["grad_enabled"] is False for call in model.inference_calls)
 
 
+def test_rife_runtime_predicts_fixed_2x_model_batch_in_one_call() -> None:
+    model = _AverageRIFEModel()
+    runtime = PracticalRIFEPyTorchRuntime(
+        model,
+        PracticalRIFEPyTorchRuntimeConfig(model_name="rife_unit", device="cpu", divisor=8, scale=0.5),
+    )
+    runtime.load()
+    left = torch.stack((torch.full((3, 5, 7), 0.0), torch.full((3, 5, 7), 0.2)), dim=0)
+    right = torch.stack((torch.full((3, 5, 7), 0.4), torch.full((3, 5, 7), 0.8)), dim=0)
+
+    result = runtime.predict_batch(ModelBatchRequest(left=left, right=right))
+
+    assert result.padded_shape == (2, 3, 8, 8)
+    assert torch.allclose(result.outputs[0][0], torch.full((3, 5, 7), 0.2))
+    assert torch.allclose(result.outputs[1][0], torch.full((3, 5, 7), 0.5))
+    assert [frame.mean().item() for frame in result.middle_frames] == pytest.approx([0.2, 0.5])
+    assert result.metadata["model_call_count"] == 1
+    assert model.inference_call_count == 1
+    assert model.inference_calls[0]["left_shape"] == (2, 3, 8, 8)
+    assert model.inference_calls[0]["scale"] == 0.5
+    assert _timestep_values(model.inference_calls[0]["timestep"]) == [0.5, 0.5]
+
+
+def test_rife_runtime_predicts_nx_model_batch_pair_major_timestep_order() -> None:
+    model = _AverageRIFEModel()
+    runtime = PracticalRIFEPyTorchRuntime(model, PracticalRIFEPyTorchRuntimeConfig(device="cpu", divisor=8))
+    runtime.load()
+    left = torch.stack((torch.zeros(3, 5, 7), torch.full((3, 5, 7), 0.2)), dim=0)
+    right = torch.stack((torch.ones(3, 5, 7), torch.full((3, 5, 7), 0.6)), dim=0)
+
+    result = runtime.predict_batch(
+        ModelBatchRequest(left=left, right=right, mode=InferenceMode.ARBITRARY_NX, interpolation_factor=4)
+    )
+
+    assert result.timesteps == (0.25, 0.5, 0.75)
+    assert [frame.mean().item() for frame in result.flattened_outputs] == pytest.approx(
+        [0.25, 0.5, 0.75, 0.3, 0.4, 0.5]
+    )
+    assert result.metadata["model_call_count"] == 1
+    assert model.inference_call_count == 1
+    assert model.inference_calls[0]["left_shape"] == (6, 3, 8, 8)
+    assert _timestep_values(model.inference_calls[0]["timestep"]) == [0.25, 0.5, 0.75, 0.25, 0.5, 0.75]
+
+
+def test_rife_runtime_batch_respects_effective_batch_size_config() -> None:
+    model = _AverageRIFEModel()
+    runtime = PracticalRIFEPyTorchRuntime(
+        model,
+        PracticalRIFEPyTorchRuntimeConfig(device="cpu", divisor=8, inference_batch_size=2),
+    )
+    runtime.load()
+    request = ModelBatchRequest(
+        left=torch.zeros(2, 3, 5, 7),
+        right=torch.ones(2, 3, 5, 7),
+        mode="arbitrary_nx",
+        interpolation_factor=4,
+    )
+
+    result = runtime.predict_batch(request)
+
+    assert result.metadata["effective_batch_size"] == 2
+    assert result.metadata["model_call_count"] == 3
+    assert [call["left_shape"][0] for call in model.inference_calls] == [2, 2, 2]
+
+
 def test_rife_adapter_predict_intermediate_frames_uses_arbitrary_nx_request() -> None:
     adapter = PracticalRIFEAdapter(PracticalRIFEAdapterConfig(device="cpu", divisor=8))
     adapter._model = _AverageRIFEModel()
@@ -156,6 +221,26 @@ def test_rife_adapter_predict_intermediate_frames_uses_arbitrary_nx_request() ->
     assert {call["scale"] for call in adapter._model.inference_calls} == {0.5}
 
 
+def test_rife_adapter_predict_frame_pairs_batch_wraps_runtime_batch_api() -> None:
+    adapter = PracticalRIFEAdapter(PracticalRIFEAdapterConfig(device="cpu", divisor=8))
+    adapter._model = _AverageRIFEModel()
+    request = ModelBatchRequest(
+        left=torch.stack((torch.zeros(3, 5, 7), torch.full((3, 5, 7), 0.2)), dim=0),
+        right=torch.stack((torch.ones(3, 5, 7), torch.full((3, 5, 7), 0.6)), dim=0),
+        mode="arbitrary_nx",
+        interpolation_factor=4,
+        backend_options={"scale": 0.5},
+    )
+
+    result = adapter.predict_frame_pairs_batch(request)
+
+    assert [frame.mean().item() for frame in result.flattened_outputs] == pytest.approx(
+        [0.25, 0.5, 0.75, 0.3, 0.4, 0.5]
+    )
+    assert result.metadata["scale"] == 0.5
+    assert adapter._model.inference_call_count == 1
+
+
 def test_rife_scale_validation_matches_upstream_allowed_values() -> None:
     assert [validate_rife_scale(scale) for scale in (0.25, 0.5, 1.0, 2.0, 4.0)] == [
         0.25,
@@ -172,6 +257,7 @@ def test_rife_configs_can_be_used_by_shared_inference_and_validation_configs() -
     default_config = PracticalRIFEAdapterConfig()
     assert default_config.model_name == "practical_rife_v4_26"
     assert default_config.checkpoint_path == Path("Practical-RIFE/RIFEv4.26/train_log")
+    assert default_config.inference_batch_size is None
 
     inference = VideoInferenceConfig.from_mapping(
         {
@@ -260,6 +346,12 @@ class _AverageRIFEModel:
             }
         )
         return torch.clamp(img0 * (1.0 - timestep) + img1 * timestep, 0.0, 1.0)
+
+
+def _timestep_values(value) -> list[float]:
+    if isinstance(value, torch.Tensor):
+        return [float(item) for item in value.detach().cpu().reshape(-1)]
+    return [float(value)]
 
 
 class _LoadRecordingRIFEModel:

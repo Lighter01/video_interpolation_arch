@@ -1,9 +1,9 @@
 # Title and Metadata
 
 - Stage: Stage 2 - Inference Runtime Refactor and Serving Readiness
-- Status: Active ExecPlan - Milestone 7 complete, Milestone 8 not started
+- Status: Completed ExecPlan - Stage 2 Milestone 9 documentation, project map, and handoff complete; CUDA smokes deferred
 - Created: 2026-05-31
-- Updated: 2026-05-31
+- Updated: 2026-06-01
 - Stage plan: `.agent/stage_plans/02_inference_runtime_refactor_stage_plan.md`
 - Global plan: `.agent/general_plan.md`
 - Prior ExecPlan: `.agent/docs/exec-plans/completed/01_ml_core_selected.execplan.md`
@@ -832,6 +832,7 @@ Recovery:
 - `onnxruntime` 1.26.0 is installed and lists `TensorrtExecutionProvider`, `CUDAExecutionProvider`, and `CPUExecutionProvider`, but `torch.cuda.is_available()` is `False` in this environment. Milestone 7 validation therefore used only `CPUExecutionProvider`.
 - EMA ONNX dynamic axes do not imply working dynamic H/W. The exported graph runs at the original `32x32` sample shape but fails at `64x64` in a LayerNormalization node, likely because EMA feature-extractor shape math/cached attention-mask logic was traced with shape-dependent constants.
 - Practical-RIFE dynamic H/W ONNX Runtime execution works for `128x256`, but strict tensor closeness is slightly unstable at that shape (`max_abs_error` above `1e-3` while MAE remains low). Original and simplified ONNX artifacts behave the same for the tested shape.
+- Stage 2.5 pre-Milestone-3 work superseded the original legacy-only ONNX export default: active model exports now default to dynamo/opset 18/no simplification, Practical-RIFE has a dynamo artifact with `.onnx.data`, and legacy `.onnx` / `.simplified.onnx` loading remains available explicitly.
 
 ## Decision Log
 
@@ -876,7 +877,7 @@ Recovery:
 - 2026-05-31: Use `FramePairRequest.backend_options["scale"]` for request-time Practical-RIFE scale instead of adding a model-specific top-level request field. Rationale: `scale` is specific to Practical-RIFE, while `backend_options` already exists for serving/runtime options; local CLI still exposes the value explicitly with `--scale`/`--rife-scale`, and future BentoML services can pass the same request option with `interpolation_factor`.
 - 2026-05-31: Use separate project-owned `EMAVFIOnnxWrapper` and `PracticalRIFEOnnxWrapper` classes for ONNX export rather than exporting full adapters or local video inference. Rationale: wrappers make the export boundary explicit as prepared/padded tensors plus timestep to generated tensor, while padding, Nx loops, video I/O, and serving orchestration remain Python-owned.
 - 2026-05-31: Default Milestone 6 export commands to dynamic H/W metadata and provide `--shape-mode static` as an explicit option. Rationale: the owner asked to attempt dynamic H/W first; static export is available only as a configured fallback/tooling path.
-- 2026-05-31: Run ONNX simplification by default but treat simplifier failure as non-fatal when the original ONNX file passes checker validation. Rationale: later Milestone 7 should prefer simplified artifacts when available, but simplifier/operator support should not hide or invalidate an otherwise usable original export.
+- 2026-05-31: Run ONNX simplification by default but treat simplifier failure as non-fatal when the original ONNX file passes checker validation. Rationale: later Milestone 7 should prefer simplified artifacts when available, but simplifier/operator support should not hide or invalidate an otherwise usable original export. Superseded for active Stage 2.5 exports by the 2026-06-01 dynamo/opset18/no-simplification default while preserving legacy simplification as an explicit option.
 - 2026-05-31: Keep ONNX Runtime dependency unused in Milestone 6 implementation despite being listed in `pyproject.toml`. Rationale: this milestone is export-boundary work only; runtime loading, provider selection, and PyTorch-vs-ONNX equivalence are Milestone 7.
 - 2026-05-31: Prewarm ONNX wrapper modules once with the sample inputs before tracing. Rationale: EMA lazily creates shape-specific inference buffers during the first forward pass, and prewarming keeps the trace state stable without patching upstream math or moving padding/timestep orchestration into ONNX.
 - 2026-05-31: Default ONNX Runtime validation CLI commands to `CPUExecutionProvider` while allowing explicit repeated `--provider` options. Rationale: CPU smoke checks are safe in the current environment; CUDA can be requested explicitly when available, and unavailable providers should fail clearly before session creation.
@@ -884,10 +885,66 @@ Recovery:
 - 2026-05-31: Keep Practical-RIFE `scale` baked into the selected ONNX artifact and reject request-time ONNX scale mismatches. Rationale: the Milestone 6 RIFE ONNX wrapper builds `scale_list` as graph constants; future serving should select or export an artifact that matches the requested scale rather than silently using the wrong scale.
 - 2026-05-31: Write sample PyTorch/ONNX/normalized-absdiff PNGs only when tensor outputs are available but `allclose` fails. Rationale: this keeps passing validation output compact while giving concrete inspection artifacts for backend/operator differences such as the Practical-RIFE dynamic-shape mismatch.
 - 2026-05-31: Do not relax the `1e-3` tensor tolerance for Practical-RIFE dynamic `128x256` despite low MAE. Rationale: the owner requested starting with `atol=1e-3`, `rtol=1e-3`; the observed mismatch is recorded for follow-up rather than hidden by a looser threshold.
+- 2026-06-01: Use Practical-RIFE v4.26 PyTorch CUDA as the default Milestone 8 serving path and keep ONNX as a separate example. Rationale: Stage 2.5 handoff recommends PyTorch first for serving because it avoids ONNX external-data/provider packaging variables, while ONNX remains useful as an explicit alternate backend.
+- 2026-06-01: Limit the BentoML example service boundary to sequential arbitrary-Nx factors `2..4`. Rationale: runtime code supports broader factors and batched execution, but current serving examples should be conservative and avoid the Stage 2.5 benchmarked batched path for service requests.
+- 2026-06-01: Keep BentoML examples outside `src/video_interpolation` and route both examples through `src/video_interpolation/serving.py`. Rationale: examples should stay developer-facing and thin, while the reusable project-owned serving facade owns validation, adapter/runtime initialization, ONNX artifact/provider handling, and video inference calls.
 
 ## Outcomes & Handoff
 
-Milestones 1, 2, 3, 4, 5, 6, and 7 are complete. Milestone 8 has not started.
+Stage 2 is complete and ready for user acceptance. It produced a reusable inference runtime subsystem, model-specific PyTorch and ONNX runtime boundaries, request/result APIs, Practical-RIFE v4.26 as the active default, arbitrary-Nx local video inference, ONNX export/runtime tooling, video-pipeline benchmark support carried in from Stage 2.5, and a minimal Practical-RIFE serving-readiness layer with BentoML developer examples.
+
+Final serving recommendation:
+
+- Production target model: Practical-RIFE v4.26 (`practical_rife_v4_26`).
+- Default serving backend: PyTorch runtime backend.
+- Default device: `cuda`.
+- Alternative backend: ONNX Runtime with `CUDAExecutionProvider`.
+- Serving execution mode: `sequential`.
+- Interpolation mode: `arbitrary_nx`.
+- Service-level `interpolation_factor` range: `2..4`.
+- `scale` is a runtime/request parameter.
+- Current batched inference is validated for local runtime and benchmark paths, but is not recommended for serving yet.
+- EMA-VFI is not the current serving target.
+- AMT-S is legacy and out of scope for Stage 2 serving.
+
+Stage 2.5 decisions affecting this handoff:
+
+- Stage 2.5 is accepted and archived at `.agent/docs/exec-plans/completed/02_5_inference_runtime_stabilization.execplan.md`.
+- Dynamo/opset 18 ONNX export is the default export mode; simplification is legacy-only.
+- Practical-RIFE's accepted ONNX artifact is `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` with adjacent `.onnx.data`; fixed-batch RIFE dynamo artifacts are obsolete and unsupported.
+- EMA ONNX is constrained-dynamic and requires project-owned external divisor `112` padding/unpadding; EMA remains useful for experimentation but is not the current serving target.
+- CUDA-provider ONNX behavior remains deferred until validation in a CUDA-capable environment.
+
+Serving handoff artifacts:
+
+- `src/video_interpolation/serving.py` contains `PracticalRIFEServingConfig`, `PracticalRIFEVideoInferenceRunner`, `PracticalRIFEOnnxVideoAdapter`, and `run_practical_rife_video_inference(...)`.
+- `examples/bentoml/practical_rife_torch_service/service.py` is the recommended PyTorch CUDA BentoML compatibility example.
+- `examples/bentoml/practical_rife_onnx_service/service.py` is the alternate ONNX Runtime CUDA compatibility example.
+- `docs/stage2_inference_runtime_refactor.md` is the concise human-facing Stage 2 handoff for runtime structure, Python serving calls, ONNX caveats, BentoML example locations, and backend/service next steps.
+
+Validation status at handoff:
+
+- Full automated tests and lint passed after Milestone 8: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` reported `156 passed, 59 warnings`; `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` reported `All checks passed`.
+- Stage 2 Milestone 9 documentation-only rerun: unprefixed `uv run pytest` and `uv run ruff check src tests` failed at uv startup because `/home/lighter_01/.cache/uv` is read-only in the sandbox. Fallback validation passed: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` reported `156 passed, 59 warnings`, and `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` reported `All checks passed`.
+- CUDA smokes were deferred because `torch.cuda.is_available()` returned `False` in this environment. ONNX Runtime lists CUDA/TensorRT providers, but CUDA execution is not classified from CPU-only evidence.
+
+Known limitations:
+
+- No production BentoML service, FastAPI app, queue, database, object storage flow, frontend, monitoring, auth, or Docker deployment is included in Stage 2.
+- The BentoML examples accept path strings and return metadata; they are compatibility examples, not upload APIs.
+- Practical-RIFE ONNX bakes `scale` into the artifact. ONNX serving requests must use a scale matching the loaded artifact or fail clearly.
+- Current batched inference should stay out of serving until a service-specific batching policy, queue behavior, memory budget, and GPU validation are designed.
+- EMA-VFI serving and AMT-S serving are out of the current production recommendation.
+
+Recommended next steps for backend/service developers:
+
+- Wrap `PracticalRIFEVideoInferenceRunner` in the production API/service layer and initialize the runner once per worker process.
+- Package model weights and, for ONNX deployments, keep `.onnx` and `.onnx.data` adjacent.
+- Implement request/upload handling, output storage, job state, queue/worker orchestration, deployment configuration, auth, and observability outside the inference runtime package.
+- Run short CUDA smokes for Practical-RIFE PyTorch and Practical-RIFE ONNX in the target GPU environment before making production performance or provider claims.
+- Define a production artifact/versioning policy for PyTorch checkpoints and ONNX artifacts.
+
+Detailed milestone record:
 
 Milestone 1 implemented:
 
@@ -1002,18 +1059,40 @@ Latest validation:
 - `UV_CACHE_DIR=/tmp/uv-cache uv run python -m video_interpolation.cli rife adapter-check` exited 0 and reported `blocked` because CUDA is unavailable for the default Practical-RIFE v4.26 config.
 - CUDA was unavailable, so CUDA EMA and Practical-RIFE export/runtime smoke checks were deferred. CPU export and ONNX Runtime validation smokes were run instead.
 
-Not changed through Milestone 7:
+Stage 2.5 handoff update:
 
-- No BentoML proof.
+- Stage 2 was paused before Milestone 8 so Stage 2.5 could stabilize ONNX artifacts, real-image equivalence checks, true model batching, video chunking, and benchmark evidence.
+- Stage 2.5 Milestones 1 through 9 are complete and accepted. The full handoff is in `.agent/docs/exec-plans/completed/02_5_inference_runtime_stabilization.execplan.md`; the concise human-facing summary is in `docs/stage2_5_inference_runtime_stabilization.md`.
+- Practical-RIFE v4.26 PyTorch is the recommended first model/backend for the Milestone 8 BentoML compatibility proof. It exercises the active default model and request/result API without ONNX provider or external-data packaging variables.
+- Practical-RIFE v4.26 ONNX dynamic-batch CPU is the recommended secondary proof path if ORT is included. Use `model_exports/onnx/practical_rife_v4_26/practical_rife_v4_26_dynamo_dynamic_batch_hw_opset18_h384w512.onnx` and keep the adjacent `.onnx.data` file next to it.
+- EMA PyTorch remains the general EMA serving path. EMA ONNX is acceptable only for routes that enforce project-owned external divisor `112` padding/unpadding with `model_exports/onnx/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` plus adjacent `.onnx.data`.
+- Fixed-batch Practical-RIFE dynamo artifacts are obsolete and unsupported. Legacy `.onnx` / `.simplified.onnx` artifacts remain loadable only through explicit path or legacy resolution flags.
+- Batch semantics after Stage 2.5 are pair-major. Fixed 2x uses one flattened row per pair at `t=0.5`; Nx uses `pairs * (factor - 1)` flattened rows and reconstructs `outputs[pair_index][timestep_index]`.
+- CUDA-provider ONNX validation and MLflow server logging remain deferred; do not classify CUDA or production tracking behavior from CPU-only reports.
+
+Still not changed before Milestone 8 implementation:
+
+- No BentoML proof yet.
 - No AMT-S refactor or active Nx support.
 - No model weights or dependencies changed.
 - No upstream model repository files patched in Milestone 7.
-- No full-video ONNX inference path or production serving API.
+- No production serving API, upload flow, queue, storage orchestration, database work, frontend, monitoring, or deployment pipeline.
 
-Next milestone:
+Milestone 8 implementation update:
 
-Milestone 8 should implement only the minimal BentoML compatibility proof. It should instantiate a refactored adapter/runtime and call the request/result API from a BentoML-compatible service/proof without adding production upload handling, FastAPI, Celery, Redis, storage orchestration, database work, frontend, monitoring, or deployment pipeline.
+- Added `src/video_interpolation/serving.py` with `PracticalRIFEServingConfig`, `PracticalRIFEVideoInferenceRunner`, `PracticalRIFEOnnxVideoAdapter`, and `run_practical_rife_video_inference(...)`.
+- Serving defaults use Practical-RIFE v4.26, PyTorch backend, `device="cuda"`, sequential `arbitrary_nx`, factor range `2..4`, `scale=1.0`, and `codec="libx264"`.
+- ONNX serving remains an alternate path with `provider="CUDAExecutionProvider"` and scale validation against the artifact's baked scale.
+- Added developer-facing BentoML examples under `examples/bentoml/practical_rife_torch_service/` and `examples/bentoml/practical_rife_onnx_service/`.
+- Updated `.gitignore` so `examples/` can be tracked; local `__pycache__` directories were removed from the working tree and none were tracked.
+- Focused serving tests were added in `tests/test_serving.py`.
+- Validation passed: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` reported `156 passed, 59 warnings`; `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` reported `All checks passed`; `git diff --check` passed.
+- Focused validation also passed for `tests/test_serving.py` and focused ruff on the serving/examples files.
+- `torch.cuda.is_available()` returned `False`, so Practical-RIFE PyTorch CUDA and ONNX CUDA short-video smokes were deferred. ONNX Runtime lists `TensorrtExecutionProvider`, `CUDAExecutionProvider`, and `CPUExecutionProvider`, but CUDA model execution was not classified without PyTorch CUDA availability.
 
-This ExecPlan remains active. The next implementation session should begin with Milestone 8, not Milestone 7.
+Milestone 9 closeout update:
 
-Keep this ExecPlan updated during implementation with progress, discoveries, upstream patches, validation results, and any blocker evidence.
+- Final Stage 2 handoff content was added to this ExecPlan and `docs/stage2_inference_runtime_refactor.md`.
+- `.agent/docs/PROJECT_MAP.md` was updated to point to the completed Stage 2 ExecPlan and current serving-readiness files.
+- Validation was rerun after the documentation-only closeout edits: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` passed with `156 passed, 59 warnings`; `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` passed.
+- Stage 2 is ready for user acceptance and backend/service-developer handoff. No new runtime, backend, serving, export, or batch-inference features were added in Milestone 9.

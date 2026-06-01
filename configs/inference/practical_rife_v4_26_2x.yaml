@@ -16,8 +16,10 @@ model:
   divisor: 128
   strict_checkpoint: false
 limit_pairs: null
-interpolation_mode: fixed_2x
+interpolation_mode: arbitrary_nx
 interpolation_factor: 2
+execution_mode: sequential
+inference_batch_size: 1
 output_fps_multiplier: 2.0
 
 # FFmpeg/PyAV encoder name.

@@ -11,6 +11,7 @@ from video_interpolation.inference_runtime.onnx_export import (
     OnnxShapeMode,
     PracticalRIFEOnnxWrapper,
     create_sample_onnx_inputs,
+    default_onnx_artifact_stem,
     dynamic_axes_for_config,
     dynamic_shapes_for_config,
     export_torch_module_to_onnx,
@@ -31,11 +32,11 @@ def test_onnx_export_config_validates_shape_mode_and_artifact_paths(tmp_path: Pa
     paths = resolve_onnx_artifact_paths(config)
 
     assert config.shape_mode is OnnxShapeMode.DYNAMIC_HW
-    assert config.exporter is OnnxExporterKind.LEGACY
+    assert config.exporter is OnnxExporterKind.DYNAMO
     assert config.sample_input_shape == (1, 3, 32, 48)
     assert paths.output_dir == tmp_path / "ema_vfi_small"
-    assert paths.original_path.name == "ema_vfi_small_dynamic_hw_opset17.onnx"
-    assert paths.simplified_path.name == "ema_vfi_small_dynamic_hw_opset17.simplified.onnx"
+    assert paths.original_path.name == "ema_vfi_small_dynamo_dynamic_hw_opset17.onnx"
+    assert paths.simplified_path.name == "ema_vfi_small_dynamo_dynamic_hw_opset17.simplified.onnx"
     assert dynamic_axes_for_config(config)["left"] == {0: "batch", 2: "height", 3: "width"}
 
     static_config = OnnxExportConfig(
@@ -46,6 +47,11 @@ def test_onnx_export_config_validates_shape_mode_and_artifact_paths(tmp_path: Pa
     assert dynamic_axes_for_config(static_config) is None
     assert dynamic_shapes_for_config(static_config) is None
 
+    default_config = OnnxExportConfig(model_name="unit", output_dir=tmp_path)
+    assert default_config.exporter is OnnxExporterKind.DYNAMO
+    assert default_config.opset_version == 18
+    assert not default_config.simplify
+
     dynamo_config = OnnxExportConfig(
         model_name="ema_vfi_small",
         output_dir=tmp_path,
@@ -54,7 +60,27 @@ def test_onnx_export_config_validates_shape_mode_and_artifact_paths(tmp_path: Pa
     )
     assert dynamo_config.exporter is OnnxExporterKind.DYNAMO
     assert dynamo_config.dynamic_hw_multiple == 112
-    assert dynamic_shapes_for_config(dynamo_config) is not None
+    dynamic_shapes = dynamic_shapes_for_config(dynamo_config)
+    assert dynamic_shapes is not None
+    batch_dim = dynamic_shapes[0][0]
+    assert dynamic_shapes[1][0] is batch_dim
+    assert dynamic_shapes[2][0] is batch_dim
+    assert set(dynamic_shapes[0]) == {0, 2, 3}
+    assert set(dynamic_shapes[1]) == {0, 2, 3}
+    assert set(dynamic_shapes[2]) == {0}
+
+    legacy_config = OnnxExportConfig(model_name="ema_vfi_small", output_dir=tmp_path, exporter="legacy")
+    legacy_paths = resolve_onnx_artifact_paths(legacy_config)
+    assert legacy_paths.original_path.name == "ema_vfi_small_dynamic_hw_opset18.onnx"
+    assert (
+        default_onnx_artifact_stem(
+            "ema_vfi_small",
+            shape_mode=OnnxShapeMode.DYNAMIC_HW,
+            opset_version=17,
+            exporter=OnnxExporterKind.LEGACY,
+        )
+        == "ema_vfi_small_dynamic_hw_opset17"
+    )
 
 
 def test_onnx_export_config_resolves_relative_output_dir_before_later_cwd_changes(
@@ -84,6 +110,7 @@ def test_onnx_export_config_resolves_relative_output_dir_before_later_cwd_change
         ({"model_name": "unit", "exporter": "future"}, "exporter"),
         ({"model_name": "unit", "dynamic_hw_multiple": 0}, "dynamic_hw_multiple"),
         ({"model_name": "unit", "timestep": 1.0}, "timestep"),
+        ({"model_name": "unit", "exporter": "dynamo", "simplify": True}, "simplification"),
     ],
 )
 def test_onnx_export_config_rejects_invalid_options(kwargs: dict[str, object], message: str) -> None:
@@ -139,6 +166,7 @@ def test_export_torch_module_to_onnx_writes_original_artifact_without_simplifica
         output_dir=tmp_path,
         sample_input_shape=(1, 3, 4, 4),
         shape_mode=OnnxShapeMode.DYNAMIC_HW,
+        exporter=OnnxExporterKind.LEGACY,
         simplify=False,
     )
 
@@ -151,6 +179,23 @@ def test_export_torch_module_to_onnx_writes_original_artifact_without_simplifica
     assert result.preferred_path == result.original_path
     assert result.simplification_status == "not_requested"
     assert result.dynamic_axes["intermediate_frame"] == {0: "batch", 2: "height", 3: "width"}
+
+
+def test_export_torch_module_to_onnx_writes_dynamo_artifact_by_default(tmp_path: Path) -> None:
+    pytest.importorskip("onnx")
+    config = OnnxExportConfig(
+        model_name="unit_model",
+        output_dir=tmp_path,
+        sample_input_shape=(1, 3, 4, 4),
+    )
+
+    result = export_torch_module_to_onnx(_TinyOnnxModule(), config)
+
+    assert result.success
+    assert result.exporter is OnnxExporterKind.DYNAMO
+    assert result.original_path.name == "unit_model_dynamo_dynamic_hw_opset18.onnx"
+    assert result.preferred_path == result.original_path
+    assert result.simplification_status == "not_requested"
 
 
 def test_export_torch_module_to_onnx_reports_export_failure(tmp_path: Path) -> None:

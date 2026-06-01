@@ -11,7 +11,13 @@ from typing import Any
 import torch
 
 from video_interpolation.adapters.base import AdapterEnvironmentReport, ModelAdapter, ModelAdapterError
-from video_interpolation.inference_runtime.api import FramePairRequest, FramePairResult, InferenceMode
+from video_interpolation.inference_runtime.api import (
+    FramePairRequest,
+    FramePairResult,
+    InferenceMode,
+    ModelBatchRequest,
+    ModelBatchResult,
+)
 from video_interpolation.inference_runtime.ema import (
     EMAVFIPyTorchRuntime,
     EMAVFIPyTorchRuntimeConfig,
@@ -35,6 +41,7 @@ class EMAVFIAdapterConfig:
     tta: bool = False
     fast_tta: bool = False
     divisor: int = 32
+    inference_batch_size: int | None = None
     strict_checkpoint: bool = True
 
     @classmethod
@@ -174,6 +181,19 @@ class EMAVFIAdapter(ModelAdapter):
         self.eval()
         return self._require_runtime().predict(request)
 
+    def predict_frame_pairs_batch(self, request: ModelBatchRequest) -> ModelBatchResult:
+        self._require_model()
+        self.eval()
+        return self._require_runtime().predict_batch(request)
+
+    def predict_batch(self, pairs: Sequence[tuple[torch.Tensor, torch.Tensor]]) -> list[torch.Tensor]:
+        if not pairs:
+            return []
+        left_batch = torch.stack(tuple(left for left, _right in pairs), dim=0)
+        right_batch = torch.stack(tuple(right for _left, right in pairs), dim=0)
+        request = ModelBatchRequest(left=left_batch, right=right_batch)
+        return list(self.predict_frame_pairs_batch(request).middle_frames)
+
     def train_step(
         self,
         left: torch.Tensor,
@@ -241,6 +261,7 @@ class EMAVFIAdapter(ModelAdapter):
                     divisor=self.config.divisor,
                     tta=self.config.tta,
                     fast_tta=self.config.fast_tta,
+                    inference_batch_size=self.config.inference_batch_size,
                 ),
             )
             self._runtime.load()

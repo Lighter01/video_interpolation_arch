@@ -13,4 +13,5 @@ device: cuda
 tta: false
 fast_tta: false
 divisor: 32
+inference_batch_size:
 strict_checkpoint: true
