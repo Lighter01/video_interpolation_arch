@@ -23,32 +23,43 @@ def _cache_key_for_shape(shape, device, dtype):
         return None
     return key
 
+
+def _normalised_axis(length, device, dtype):
+    values = torch.arange(length, device=device, dtype=dtype)
+    if not _is_exporting() and length == 1:
+        return torch.zeros_like(values)
+    return values * (2.0 / (length - 1)) - 1.0
+
 def window_partition(x, window_size):
     B, H, W, C = x.shape
     x = x.view(B, H // window_size[0], window_size[0], W // window_size[1], window_size[1], C)
+    num_windows = B * (H // window_size[0]) * (W // window_size[1])
     windows = (
-        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size[0]*window_size[1], C)
+        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(num_windows, window_size[0]*window_size[1], C)
     )
     return windows
 
 
-def window_reverse(windows, window_size, H, W):
-    nwB, N, C = windows.shape
-    windows = windows.view(-1, window_size[0], window_size[1], C)
-    B = int(nwB / (H * W / window_size[0] / window_size[1]))
+def window_reverse(windows, window_size, H, W, batch_size=None):
+    _, _, C = windows.shape
+    if batch_size is None:
+        windows_per_item = (H // window_size[0]) * (W // window_size[1])
+        batch_size = windows.shape[0] // windows_per_item
     x = windows.view(
-        B, H // window_size[0], W // window_size[1], window_size[0], window_size[1], -1
+        batch_size, H // window_size[0], W // window_size[1], window_size[0], window_size[1], C
     )
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(batch_size, H, W, C)
     return x
 
 
 def pad_if_needed(x, size, window_size):
     n, h, w, c = size
-    pad_h = math.ceil(h / window_size[0]) * window_size[0] - h
-    pad_w = math.ceil(w / window_size[1]) * window_size[1] - w
+    pad_h = ((h + window_size[0] - 1) // window_size[0]) * window_size[0] - h
+    pad_w = ((w + window_size[1] - 1) // window_size[1]) * window_size[1] - w
+    if _is_exporting():
+        return pad_if_needed_export(x, h, w, pad_h, pad_w, window_size)
     if pad_h > 0 or pad_w > 0:  # center-pad the feature on H and W axes
-        img_mask = torch.zeros((1, h+pad_h, w+pad_w, 1))  # 1 H W 1
+        img_mask = torch.zeros((1, h+pad_h, w+pad_w, 1), device=x.device, dtype=x.dtype)  # 1 H W 1
         h_slices = (
             slice(0, pad_h//2),
             slice(pad_h//2, h+pad_h//2),
@@ -80,13 +91,67 @@ def pad_if_needed(x, size, window_size):
     return x, None
 
 
+def pad_if_needed_export(x, h, w, pad_h, pad_w, window_size):
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    h_p = h + pad_h
+    w_p = w + pad_w
+    x = nn.functional.pad(x, (0, 0, pad_left, pad_right, pad_top, pad_bottom))
+
+    h_positions = torch.arange(h_p, device=x.device).view(1, h_p, 1, 1)
+    w_positions = torch.arange(w_p, device=x.device).view(1, 1, w_p, 1)
+    inside_h = (h_positions >= pad_top) & (h_positions < pad_top + h)
+    inside_w = (w_positions >= pad_left) & (w_positions < pad_left + w)
+    img_mask = torch.where(
+        inside_h & inside_w,
+        torch.zeros((), device=x.device, dtype=x.dtype),
+        torch.ones((), device=x.device, dtype=x.dtype),
+    )
+
+    mask_windows = window_partition(img_mask, window_size).squeeze(-1)
+    attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+    return x, attn_mask
+
+
 def depad_if_needed(x, size, window_size):
     n, h, w, c = size
-    pad_h = math.ceil(h / window_size[0]) * window_size[0] - h
-    pad_w = math.ceil(w / window_size[1]) * window_size[1] - w
+    pad_h = ((h + window_size[0] - 1) // window_size[0]) * window_size[0] - h
+    pad_w = ((w + window_size[1] - 1) // window_size[1]) * window_size[1] - w
+    if _is_exporting():
+        return x[:, pad_h // 2 : pad_h // 2 + h, pad_w // 2 : pad_w // 2 + w, :].contiguous()
     if pad_h > 0 or pad_w > 0:  # remove the center-padding on feature
         return x[:, pad_h // 2 : pad_h // 2 + h, pad_w // 2 : pad_w // 2 + w, :].contiguous()
     return x
+
+
+def build_shift_attn_mask(height, width, window_size, shift_size, device, dtype):
+    h_positions = torch.arange(height, device=device).view(1, height, 1, 1)
+    w_positions = torch.arange(width, device=device).view(1, 1, width, 1)
+    h_region = torch.where(
+        h_positions < height - window_size[0],
+        torch.zeros((), device=device, dtype=torch.long),
+        torch.where(
+            h_positions < height - shift_size[0],
+            torch.ones((), device=device, dtype=torch.long),
+            torch.full((), 2, device=device, dtype=torch.long),
+        ),
+    )
+    w_region = torch.where(
+        w_positions < width - window_size[1],
+        torch.zeros((), device=device, dtype=torch.long),
+        torch.where(
+            w_positions < width - shift_size[1],
+            torch.ones((), device=device, dtype=torch.long),
+            torch.full((), 2, device=device, dtype=torch.long),
+        ),
+    )
+    region_ids = (h_region * 3 + w_region).to(dtype=dtype)
+    mask_windows = window_partition(region_ids, window_size).squeeze(-1)
+    shift_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+    return shift_mask.masked_fill(shift_mask != 0, float(-100.0)).masked_fill(shift_mask == 0, float(0.0))
 
 
 class Mlp(nn.Module):
@@ -166,7 +231,7 @@ class InterFrameAttention(nn.Module):
         B, N, C = x1.shape
         B, N, C_c = cor.shape
         q = self.q(x1).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        kv = self.kv(x2).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        kv = self.kv(x2).reshape(B, x2.shape[1], 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         cor_embed_ = self.cor_embed(cor)
         cor_embed = cor_embed_.reshape(B, N, self.num_heads, self.motion_dim // self.num_heads).permute(0, 2, 1, 3)
         k, v = kv[0], kv[1]    
@@ -177,14 +242,14 @@ class InterFrameAttention(nn.Module):
             attn = attn.view(B // nW, nW, self.num_heads, N, N) + mask.unsqueeze(
                 1
             ).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
+            attn = attn.view(B, self.num_heads, N, N)
             attn = attn.softmax(dim=-1)
         else:
             attn = attn.softmax(dim=-1)
 
         attn = self.attn_drop(attn)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        c_reverse = (attn @ cor_embed).transpose(1, 2).reshape(B, N, -1)
+        c_reverse = (attn @ cor_embed).transpose(1, 2).reshape(B, N, self.motion_dim)
         motion = self.motion_proj(c_reverse-cor_embed_)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -230,7 +295,8 @@ class MotionFormerBlock(nn.Module):
                 m.bias.data.zero_()
 
     def forward(self, x, cor, H, W, B):
-        x = x.view(2*B, H, W, -1)
+        C = x.shape[-1]
+        x = x.view(2*B, H, W, C)
         x_pad, mask = pad_if_needed(x, x.size(), self.window_size)
         cor_pad, _ = pad_if_needed(cor, cor.size(), self.window_size)
 
@@ -242,27 +308,17 @@ class MotionFormerBlock(nn.Module):
             if not _is_exporting() and hasattr(self, 'HW') and self.HW.item() == H_p * W_p:
                 shift_mask = self.attn_mask
             else:
-                shift_mask = torch.zeros((1, H_p, W_p, 1))  # 1 H W 1
-                h_slices = (slice(0, -self.window_size[0]),
-                            slice(-self.window_size[0], -self.shift_size[0]),
-                            slice(-self.shift_size[0], None))
-                w_slices = (slice(0, -self.window_size[1]),
-                            slice(-self.window_size[1], -self.shift_size[1]),
-                            slice(-self.shift_size[1], None))
-                cnt = 0
-                for h in h_slices:
-                    for w in w_slices:
-                        shift_mask[:, h, w, :] = cnt
-                        cnt += 1
-
-                mask_windows = window_partition(shift_mask, self.window_size).squeeze(-1)  
-                shift_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-                shift_mask = shift_mask.masked_fill(shift_mask != 0, 
-                                float(-100.0)).masked_fill(shift_mask == 0, 
-                                float(0.0))
+                shift_mask = build_shift_attn_mask(
+                    H_p,
+                    W_p,
+                    self.window_size,
+                    self.shift_size,
+                    x_pad.device,
+                    x_pad.dtype,
+                )
                                 
                 if mask is not None:
-                    shift_mask = shift_mask.masked_fill(mask != 0, 
+                    shift_mask = shift_mask.masked_fill(mask.to(shift_mask.device) != 0,
                                 float(-100.0))
                 if not _is_exporting():
                     self.attn_mask = shift_mask
@@ -278,23 +334,23 @@ class MotionFormerBlock(nn.Module):
         x_win = window_partition(x_pad, self.window_size)
         cor_win = window_partition(cor_pad, self.window_size)
 
-        nwB = x_win.shape[0]
         x_norm = self.norm1(x_win)
 
-        x_reverse = torch.cat([x_norm[nwB//2:], x_norm[:nwB//2]])
+        x_reverse = x_norm.reshape(2, x_norm.shape[0] // 2, x_norm.shape[1], x_norm.shape[2]).flip(0).reshape_as(x_norm)
         x_appearence, x_motion = self.attn(x_norm, x_reverse, cor_win, H, W, shift_mask)
         x_norm = x_norm + self.drop_path(x_appearence)
 
         x_back = x_norm
-        x_back_win = window_reverse(x_back, self.window_size, Hw, Ww)
-        x_motion = window_reverse(x_motion, self.window_size, Hw, Ww)
+        x_back_win = window_reverse(x_back, self.window_size, Hw, Ww, 2*B)
+        x_motion = window_reverse(x_motion, self.window_size, Hw, Ww, 2*B)
         
         if self.shift_size[0] or self.shift_size[1]:
             x_back_win = torch.roll(x_back_win, shifts=(self.shift_size[0], self.shift_size[1]), dims=(1, 2))
             x_motion = torch.roll(x_motion, shifts=(self.shift_size[0], self.shift_size[1]), dims=(1, 2))
 
-        x = depad_if_needed(x_back_win, x.size(), self.window_size).view(2*B, H * W, -1)
-        x_motion = depad_if_needed(x_motion, cor.size(), self.window_size).view(2*B, H * W, -1)
+        x = depad_if_needed(x_back_win, x.size(), self.window_size).view(2*B, H * W, C)
+        motion_channels = x_motion.shape[-1]
+        x_motion = depad_if_needed(x_motion, cor.size(), self.window_size).view(2*B, H * W, motion_channels)
             
         x = x + self.drop_path(self.mlp(self.norm2(x), H, W))
         return x, x_motion
@@ -479,15 +535,15 @@ class MotionFormer(nn.Module):
         dtype = dtype or torch.float32
         k = _cache_key_for_shape(shape, device, dtype)
         if k is None:
-            tenHorizontal = torch.linspace(-1.0, 1.0, shape[2], device=device, dtype=dtype).view(
+            tenHorizontal = _normalised_axis(shape[2], device, dtype).view(
                 1, 1, 1, shape[2]).expand(shape[0], -1, shape[1], -1).permute(0, 2, 3, 1)
-            tenVertical = torch.linspace(-1.0, 1.0, shape[1], device=device, dtype=dtype).view(
+            tenVertical = _normalised_axis(shape[1], device, dtype).view(
                 1, 1, shape[1], 1).expand(shape[0], -1, -1, shape[2]).permute(0, 2, 3, 1)
             return torch.cat([tenHorizontal, tenVertical], -1).to(device)
         if k not in self.cor:
-            tenHorizontal = torch.linspace(-1.0, 1.0, shape[2], device=device, dtype=dtype).view(
+            tenHorizontal = _normalised_axis(shape[2], device, dtype).view(
                 1, 1, 1, shape[2]).expand(shape[0], -1, shape[1], -1).permute(0, 2, 3, 1)
-            tenVertical = torch.linspace(-1.0, 1.0, shape[1], device=device, dtype=dtype).view(
+            tenVertical = _normalised_axis(shape[1], device, dtype).view(
                 1, 1, shape[1], 1).expand(shape[0], -1, -1, shape[2]).permute(0, 2, 3, 1)
             self.cor[k] = torch.cat([tenHorizontal, tenVertical], -1).to(device)
         return self.cor[k]
@@ -516,9 +572,11 @@ class MotionFormer(nn.Module):
                 cor = self.get_cor((x.shape[0], H, W), x.device, x.dtype)
                 for blk in block:
                     x, x_motion = blk(x, cor, H, W, B)
-                    motion_features[i].append(x_motion.reshape(2*B, H, W, -1).permute(0, 3, 1, 2).contiguous())
+                    motion_features[i].append(
+                        x_motion.reshape(2*B, H, W, x_motion.shape[-1]).permute(0, 3, 1, 2).contiguous()
+                    )
                 x = norm(x)
-                x = x.reshape(2*B, H, W, -1).permute(0, 3, 1, 2).contiguous()
+                x = x.reshape(2*B, H, W, x.shape[-1]).permute(0, 3, 1, 2).contiguous()
                 motion_features[i] = torch.cat(motion_features[i], 1)
             appearence_features.append(x)
         return appearence_features, motion_features
@@ -533,7 +591,7 @@ class DWConv(nn.Module):
         B, N, C = x.shape
         x = x.transpose(1, 2).reshape(B, C, H, W)
         x = self.dwconv(x)
-        x = x.reshape(B, C, -1).transpose(1, 2)
+        x = x.reshape(B, C, H * W).transpose(1, 2)
 
         return x
 

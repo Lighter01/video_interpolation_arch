@@ -47,6 +47,10 @@ class OnnxEquivalenceRecord:
     artifact_path: Path
     providers: tuple[str, ...]
     session_providers: tuple[str, ...] = ()
+    torch_padded_shape: tuple[int, ...] | None = None
+    onnx_padded_shape: tuple[int, ...] | None = None
+    torch_output_shape: tuple[int, ...] | None = None
+    onnx_output_shape: tuple[int, ...] | None = None
     metrics: TensorEquivalenceMetrics | None = None
     error: str | None = None
     torch_sample_path: Path | None = None
@@ -209,6 +213,14 @@ def run_frame_pair_equivalence_check(
                         artifact_path=artifact_path,
                         providers=resolved_providers,
                         session_providers=session_providers,
+                        torch_padded_shape=(
+                            None if torch_result.padded_shape is None else tuple(int(value) for value in torch_result.padded_shape)
+                        ),
+                        onnx_padded_shape=(
+                            None if onnx_result.padded_shape is None else tuple(int(value) for value in onnx_result.padded_shape)
+                        ),
+                        torch_output_shape=tuple(int(value) for value in torch_frame.shape),
+                        onnx_output_shape=tuple(int(value) for value in onnx_frame.shape),
                         metrics=metrics,
                         torch_sample_path=sample_paths[0],
                         onnx_sample_path=sample_paths[1],
@@ -238,7 +250,7 @@ def run_frame_pair_equivalence_check(
         atol=atol,
         rtol=rtol,
         records=tuple(records),
-        metadata={"seed": seed},
+        metadata={"seed": seed, "artifact_io": _describe_onnx_model_io(artifact_path)},
     )
 
 
@@ -263,6 +275,10 @@ def write_onnx_equivalence_report(
                 "artifact_path",
                 "providers",
                 "session_providers",
+                "torch_padded_shape",
+                "onnx_padded_shape",
+                "torch_output_shape",
+                "onnx_output_shape",
                 "mae",
                 "max_abs_error",
                 "mse",
@@ -322,6 +338,35 @@ def _validate_input_shape(shape: Sequence[int]) -> tuple[int, int, int]:
     return resolved
 
 
+def _describe_onnx_model_io(path: Path) -> dict[str, object]:
+    try:
+        import onnx
+    except ModuleNotFoundError as exc:
+        return {"status": "skipped", "error": _format_exception(exc)}
+    try:
+        model = onnx.load(str(path), load_external_data=False)
+    except Exception as exc:  # pragma: no cover - exact ONNX load errors vary by artifact.
+        return {"status": "failed", "error": _format_exception(exc)}
+    return {
+        "status": "ok",
+        "inputs": [_describe_value_info(value) for value in model.graph.input],
+        "outputs": [_describe_value_info(value) for value in model.graph.output],
+    }
+
+
+def _describe_value_info(value_info: object) -> dict[str, object]:
+    tensor_type = value_info.type.tensor_type  # type: ignore[attr-defined]
+    dims: list[int | str | None] = []
+    for dim in tensor_type.shape.dim:
+        if dim.dim_param:
+            dims.append(dim.dim_param)
+        elif dim.HasField("dim_value"):
+            dims.append(int(dim.dim_value))
+        else:
+            dims.append(None)
+    return {"name": value_info.name, "dims": dims}
+
+
 def _result_to_json_dict(result: OnnxEquivalenceCheckResult) -> dict[str, object]:
     return {
         "success": result.success,
@@ -350,6 +395,10 @@ def _record_to_json_dict(record: OnnxEquivalenceRecord) -> dict[str, object]:
         "artifact_path": str(record.artifact_path),
         "providers": list(record.providers),
         "session_providers": list(record.session_providers),
+        "torch_padded_shape": None if record.torch_padded_shape is None else "x".join(str(value) for value in record.torch_padded_shape),
+        "onnx_padded_shape": None if record.onnx_padded_shape is None else "x".join(str(value) for value in record.onnx_padded_shape),
+        "torch_output_shape": None if record.torch_output_shape is None else "x".join(str(value) for value in record.torch_output_shape),
+        "onnx_output_shape": None if record.onnx_output_shape is None else "x".join(str(value) for value in record.onnx_output_shape),
         "error": record.error,
         "torch_sample_path": None if record.torch_sample_path is None else str(record.torch_sample_path),
         "onnx_sample_path": None if record.onnx_sample_path is None else str(record.onnx_sample_path),
@@ -379,6 +428,10 @@ def _record_to_csv_dict(record: OnnxEquivalenceRecord) -> dict[str, object]:
         "artifact_path": str(record.artifact_path),
         "providers": ";".join(record.providers),
         "session_providers": ";".join(record.session_providers),
+        "torch_padded_shape": "" if record.torch_padded_shape is None else "x".join(str(value) for value in record.torch_padded_shape),
+        "onnx_padded_shape": "" if record.onnx_padded_shape is None else "x".join(str(value) for value in record.onnx_padded_shape),
+        "torch_output_shape": "" if record.torch_output_shape is None else "x".join(str(value) for value in record.torch_output_shape),
+        "onnx_output_shape": "" if record.onnx_output_shape is None else "x".join(str(value) for value in record.onnx_output_shape),
         "mae": "" if metrics is None else f"{metrics.mae:.10g}",
         "max_abs_error": "" if metrics is None else f"{metrics.max_abs_error:.10g}",
         "mse": "" if metrics is None else f"{metrics.mse:.10g}",

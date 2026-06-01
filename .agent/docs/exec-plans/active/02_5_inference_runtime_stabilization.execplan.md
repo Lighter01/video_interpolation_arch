@@ -1,7 +1,7 @@
 # Title and Metadata
 
 - Stage: Stage 2.5 - ONNX Stabilization, Real-Image Equivalence, and Batched Inference
-- Status: Active ExecPlan - Milestone 2 complete, Milestone 3 not started
+- Status: Active ExecPlan - Task 2.5 EMA dynamic ONNX refactor trial complete, Milestone 3 not started
 - Created: 2026-06-01
 - Updated: 2026-06-01
 - Stage plan: `.agent/stage_plans/02_5_inference_runtime_stabilization_stage_plan.md`
@@ -28,6 +28,7 @@ This is not a backend stage. It must not implement BentoML proof work, productio
 Read before creating this ExecPlan:
 
 - `.agent/TASK.md`
+- `.agent/tasks/TASK_2_5.md`
 - `.agent/AGENTS.md`
 - `.agent/docs/PLANS.md`
 - `.agent/docs/PROJECT_MAP.md`
@@ -688,6 +689,7 @@ Recovery:
 - 2026-06-01: Created this Stage 2.5 ExecPlan from the Stage 2.5 plan, Stage 2 active handoff, Stage 1 completed handoff, docs, current source/config/tests, model repository inspection, ONNX artifacts, validation reports, and available real-image/video smoke inputs. No source code, configs, model repositories, dependencies, or model weights were changed. Implementation has not started.
 - 2026-06-01: Started and completed Milestone 1 baseline audit only. Inspected current ONNX artifacts, ONNX validation JSON/CSV outputs, pair-test images, temporary smoke videos, Stage 2 docs/ExecPlan handoff notes, EMA feature-extractor risk areas, current ONNX validation code, and existing batch terminology in `batch_inference.py` / adapter APIs. Added `docs/stage2_5_inference_runtime_stabilization.md` and updated `.agent/docs/PROJECT_MAP.md`. No source code, configs, model repositories, dependencies, model weights, ONNX artifacts, or validation reports were changed. Code validation was skipped because this milestone changed only documentation and the ExecPlan.
 - 2026-06-01: Started and completed Milestone 2 EMA ONNX dynamic/constrained-dynamic investigation. Reproduced the existing legacy EMA ONNX dynamic-H/W failure, tested the 56-multiple external-padding hypothesis, tried a larger legacy trace shape, tried the modern `torch.onnx.export(..., dynamo=True, dynamic_shapes=...)` route, and applied narrow EMA cache/export-safety patches in `model_repos/EMA-VFI/model/feature_extractor.py` and `model_repos/EMA-VFI/model/warplayer.py`. Classification: EMA ONNX currently works only for export-size/static-like inputs and is not suitable for dynamic serving; EMA serving should remain PyTorch-only unless a later broad upstream refactor is approved. Milestone 3 was not started.
+- 2026-06-01: Completed the explicit Task 2.5 broader EMA refactor trial requested in `.agent/tasks/TASK_2_5.md`. Refactored EMA transformer window reversal, frame-pair swapping, export-time padding/depadding, shift-mask construction, coordinate grids, and warp grids to support the modern dynamo exporter. Added selectable `legacy`/`dynamo` ONNX exporter support, constrained `--dynamic-hw-multiple` export shapes, custom `--artifact-stem`, EMA validation `--divisor`, and richer ONNX validation reports. Exported one bounded constrained-dynamic EMA artifact at opset 18 with symbolic `112*height_units` and `112*width_units`; validation passed on original `64x64`, `112x168`, and `320x512` inputs with external divisor `112`. Classification is now `2. EMA constrained-dynamic ONNX works with documented external padding constraints`; divisor `32` still fails, so this is not fully dynamic.
 
 ## Milestone 1 Baseline Audit
 
@@ -989,7 +991,143 @@ Compatibility notes:
 
 ### Milestone 2 next step
 
-Milestone 3 should start real-image ONNX-vs-PyTorch equivalence for Practical-RIFE, and should treat EMA ONNX as deferred/PyTorch-only unless the user explicitly approves a broader EMA upstream dynamic-shape rewrite.
+Superseded by the Task 2.5 addendum below. Milestone 3 may now include EMA real-image ONNX-vs-PyTorch equivalence using the constrained-dynamic divisor-112 artifact, in addition to the originally planned Practical-RIFE checks.
+
+## Task 2.5 EMA Dynamic ONNX Refactor Trial
+
+This addendum implements the broader bounded EMA refactor trial requested in `.agent/tasks/TASK_2_5.md`, after Milestone 2 and before Milestone 3.
+
+### Code changes
+
+- `model_repos/EMA-VFI/model/feature_extractor.py`
+  - Replaced `window_reverse(...)` Python `int(...)` batch inference with an optional explicit `batch_size`.
+  - Replaced dynamic frame-pair swapping slices with reshape/flip/reshape.
+  - Added tensor-derived shift-mask construction with `torch.arange` and `window_partition`.
+  - Added an export-only branchless padding/depadding path to avoid Python shape guards during `torch.export`.
+  - Replaced dynamic-size `torch.linspace` coordinate grids with `torch.arange` normalization.
+  - Replaced exporter-sensitive `-1` channel reshapes with explicit known channel dimensions.
+- `model_repos/EMA-VFI/model/warplayer.py`
+  - Replaced warp-grid `torch.linspace` construction with `torch.arange` normalization.
+- `src/video_interpolation/inference_runtime/onnx_export.py`
+  - Added `OnnxExporterKind` with `legacy` default and selectable `dynamo`.
+  - Added dynamo `dynamic_shapes` export support.
+  - Added optional constrained dynamic H/W shape declarations through `dynamic_hw_multiple`.
+- `src/video_interpolation/cli.py`
+  - Added `ema export-onnx --exporter`, `--artifact-stem`, and `--dynamic-hw-multiple`.
+  - Added `ema validate-onnx --divisor` to validate external padding policies.
+- `src/video_interpolation/inference_runtime/onnx_validation.py`
+  - Added padded-shape and output-shape fields to per-shape records.
+  - Added ONNX input/output dimension metadata to validation report metadata.
+
+Existing legacy export behavior remains the default.
+
+### Rollback and baseline
+
+Rollback branch:
+
+```text
+ema-vfi-dynamic-onnx-trial
+```
+
+Rollback commit:
+
+```text
+df2f732c89405bd2ea654657f4c408168d1c41eb
+```
+
+Pre-trial tracked diff snapshot:
+
+```text
+outputs/onnx_validation/stage2_5_task_2_5/pre_trial_tracked.diff
+```
+
+Baseline PyTorch outputs before refactor:
+
+```text
+outputs/onnx_validation/stage2_5_task_2_5/baseline_torch_pre/
+```
+
+Final PyTorch identity report after refactor:
+
+```text
+outputs/onnx_validation/stage2_5_task_2_5/baseline_torch_post_final/identity_report.json
+```
+
+Final identity metrics against the pre-refactor baseline with divisor `112`:
+
+| Original shape | Padded shape | MAE | Max abs |
+| --- | --- | --- | --- |
+| `64x64` | `1x3x112x112` | `7.345734047703445e-07` | `6.258487701416016e-06` |
+| `112x168` | `1x3x112x224` | `1.5290747796825599e-06` | `5.59687614440918e-05` |
+| `320x512` | `1x3x336x560` | `2.8164572540845256e-06` | `4.2319297790527344e-05` |
+
+All are within the Task 2.5 acceptance threshold of MAE `<= 1e-5` and max abs `<= 1e-4`.
+
+### ONNX artifact and validation
+
+Accepted artifact:
+
+```text
+model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx
+model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx.data
+```
+
+Export command:
+
+```bash
+uv run python -m video_interpolation.cli ema export-onnx --device cpu --output-dir model_exports/onnx/stage2_5_task_2_5_dynamo --opset-version 18 --height 336 --width 560 --exporter dynamo --dynamic-hw-multiple 112 --artifact-stem ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560 --no-simplify
+```
+
+The graph exposes constrained symbolic H/W:
+
+```text
+left[batch, 3, 112*height_units, 112*width_units]
+right[batch, 3, 112*height_units, 112*width_units]
+timestep[batch, 1, 1, 1]
+intermediate_frame[batch, 3, 112*height_units, 112*width_units]
+```
+
+Accepted divisor-112 validation:
+
+```bash
+uv run python -m video_interpolation.cli ema validate-onnx --torch-device cpu --onnx-path model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx --provider cpu --shape 64x64 --shape 112x168 --shape 320x512 --divisor 112 --output-dir outputs/onnx_validation/stage2_5_task_2_5/dynamo_div112_h336w560
+```
+
+Report:
+
+```text
+outputs/onnx_validation/stage2_5_task_2_5/dynamo_div112_h336w560/ema_vfi_small/equivalence_report.json
+```
+
+Result:
+
+- all three original shapes passed through one artifact;
+- mean MAE `1.0100862e-06`;
+- max abs error `4.1246414e-05`;
+- unpadded output shapes matched original H/W.
+
+Divisor-32 probe:
+
+```text
+outputs/onnx_validation/stage2_5_task_2_5/dynamo_div32_h336w560/ema_vfi_small/equivalence_report.json
+```
+
+Result: failed in the expected window reshape path because divisor `32` produces padded shapes that are not multiples of `112`.
+
+### Classification
+
+Task 2.5 final classification:
+
+```text
+2. EMA constrained-dynamic ONNX works with documented external padding constraints.
+```
+
+Serving implication:
+
+- EMA ONNX is viable only when project-owned external padding uses divisor `112`.
+- This is not fully dynamic H/W and should not be used with the existing default divisor `32`.
+- No static bucket fallback was introduced.
+- The existing PyTorch EMA path remains valid and keeps its current default divisor `32`.
 
 ## Surprises & Discoveries
 
@@ -1004,6 +1142,8 @@ Milestone 3 should start real-image ONNX-vs-PyTorch equivalence for Practical-RI
 - EMA's existing PyTorch inference path does not accept every `56`-multiple input when the external padder divisor is changed to `56`; `56x56` and `112x168` failed before ONNX with multiscale feature-size mismatches. The old divisor `32` behavior remains the safe PyTorch default.
 - `torch.onnx.export(..., dynamo=True, dynamic_shapes=...)` initially failed on EMA's symbolic shape cache keys. After cache fixes, export succeeded but the graph still baked H/W `112x112`, so export flags alone are not a dynamic-H/W fix.
 - The dynamo exporter produced an opset 18 ONNX model despite a requested opset 17 because conversion back to 17 failed for `Resize`. This is acceptable as an investigation artifact only, not a preferred serving artifact.
+- The broader Task 2.5 refactor found that unconstrained dynamo dynamic shapes still specialize H/W to the export sample. Declaring H/W as derived dimensions (`112 * height_units`, `112 * width_units`) and exporting from the largest planned padded sample `336x560` produced a bounded constrained-dynamic ONNX artifact that ORT accepts at smaller divisor-112 padded shapes.
+- EMA ONNX still fails with the existing divisor `32`; the accepted ONNX path requires explicit external divisor `112`.
 
 ## Decision Log
 
@@ -1014,8 +1154,9 @@ Milestone 3 should start real-image ONNX-vs-PyTorch equivalence for Practical-RI
 - 2026-06-01: Prefer pair-by-timestep flattening for Nx batch inference. Rationale: the Stage 2.5 plan requires this over a Python loop over timesteps where feasible.
 - 2026-06-01: Keep sequential fallback as a first-class path. Rationale: low-VRAM environments, debugging, and regression checks need behavior that is close to the current implementation.
 - 2026-06-01: Integrate benchmarks with the existing MLflow helper layer. Rationale: Stage 1 already centralized MLflow setup, bounded connectivity behavior, params, metrics, and artifact logging.
-- 2026-06-01: Classify EMA ONNX dynamic H/W as blocked/deferred after Milestone 2. Rationale: legacy dynamic-axes export fails at changed H/W, 56-multiple external padding fails, larger legacy trace-shape export is not equivalent, and modern dynamo export remains static-H/W. A true fix would require a broad upstream feature-extractor/window/grid rewrite outside the intended narrow milestone.
-- 2026-06-01: Keep EMA serving on PyTorch backend for now. Rationale: PyTorch EMA inference remains valid with the existing divisor `32`, while ONNX is only static-like and unsuitable for arbitrary user video resolutions.
+- 2026-06-01: Classify EMA ONNX dynamic H/W as blocked/deferred after Milestone 2. Rationale: legacy dynamic-axes export fails at changed H/W, 56-multiple external padding fails, larger legacy trace-shape export is not equivalent, and modern dynamo export remains static-H/W. Superseded by the explicit Task 2.5 broader refactor trial below.
+- 2026-06-01: Keep EMA serving on PyTorch backend after Milestone 2. Rationale: PyTorch EMA inference remains valid with the existing divisor `32`, while ONNX was only static-like at that point. Superseded for constrained ONNX only by the Task 2.5 divisor-112 artifact; PyTorch remains the default-safe EMA path.
+- 2026-06-01: Accept EMA constrained-dynamic ONNX for the bounded divisor-112 policy after Task 2.5. Rationale: one dynamo opset-18 artifact with symbolic `112*height_units` and `112*width_units` ran in ORT on `64x64`, `112x168`, and `320x512` original inputs through project-owned padding/unpadding, with low PyTorch-vs-ONNX error. Divisor `32` still fails, so the result is constrained-dynamic, not fully dynamic.
 
 ## Outcomes & Handoff
 

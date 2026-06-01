@@ -27,6 +27,13 @@ class OnnxShapeMode(StrEnum):
     STATIC = "static"
 
 
+class OnnxExporterKind(StrEnum):
+    """Torch ONNX exporter implementation to use."""
+
+    LEGACY = "legacy"
+    DYNAMO = "dynamo"
+
+
 @dataclass(frozen=True)
 class OnnxArtifactPaths:
     output_dir: Path
@@ -47,6 +54,8 @@ class OnnxExportConfig:
     sample_input_shape: tuple[int, int, int, int] = (1, 3, 32, 32)
     opset_version: int = DEFAULT_ONNX_OPSET_VERSION
     shape_mode: OnnxShapeMode | str = OnnxShapeMode.DYNAMIC_HW
+    exporter: OnnxExporterKind | str = OnnxExporterKind.LEGACY
+    dynamic_hw_multiple: int | None = None
     device: str | torch.device = "cpu"
     timestep: float = 0.5
     simplify: bool = True
@@ -58,6 +67,8 @@ class OnnxExportConfig:
         object.__setattr__(self, "sample_input_shape", _validate_sample_input_shape(self.sample_input_shape))
         object.__setattr__(self, "opset_version", _validate_opset_version(self.opset_version))
         object.__setattr__(self, "shape_mode", _coerce_shape_mode(self.shape_mode))
+        object.__setattr__(self, "exporter", _coerce_exporter_kind(self.exporter))
+        object.__setattr__(self, "dynamic_hw_multiple", _validate_optional_positive_int(self.dynamic_hw_multiple, "dynamic_hw_multiple"))
         object.__setattr__(self, "device", torch.device(self.device))
         object.__setattr__(self, "timestep", _validate_timestep(self.timestep))
         if self.artifact_stem is not None:
@@ -71,6 +82,7 @@ class OnnxExportResult:
     success: bool
     model_name: str
     shape_mode: OnnxShapeMode
+    exporter: OnnxExporterKind
     opset_version: int
     sample_input_shape: tuple[int, int, int, int]
     original_path: Path
@@ -144,6 +156,23 @@ def dynamic_axes_for_config(config: OnnxExportConfig) -> Mapping[str, Mapping[in
     }
 
 
+def dynamic_shapes_for_config(config: OnnxExportConfig) -> object | None:
+    if config.shape_mode is OnnxShapeMode.STATIC:
+        return None
+    batch = torch.export.Dim("batch", min=1)
+    if config.dynamic_hw_multiple is None:
+        height = torch.export.Dim("height", min=1)
+        width = torch.export.Dim("width", min=1)
+    else:
+        height = config.dynamic_hw_multiple * torch.export.Dim("height_units", min=1)
+        width = config.dynamic_hw_multiple * torch.export.Dim("width_units", min=1)
+    return (
+        {0: batch, 2: height, 3: width},
+        {0: batch, 2: height, 3: width},
+        {0: batch},
+    )
+
+
 def create_sample_onnx_inputs(config: OnnxExportConfig) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = torch.device(config.device)
     batch = config.sample_input_shape[0]
@@ -160,6 +189,7 @@ def export_torch_module_to_onnx(module: torch.nn.Module, config: OnnxExportConfi
     """
     paths = resolve_onnx_artifact_paths(config)
     dynamic_axes = dynamic_axes_for_config(config)
+    dynamic_shapes = dynamic_shapes_for_config(config) if config.exporter is OnnxExporterKind.DYNAMO else None
     paths.output_dir.mkdir(parents=True, exist_ok=True)
     preferred_path: Path | None = None
     checker_status = "not_run"
@@ -181,17 +211,30 @@ def export_torch_module_to_onnx(module: torch.nn.Module, config: OnnxExportConfi
         with torch.no_grad():
             module(*sample_inputs)
         with torch.no_grad():
-            torch.onnx.export(
-                module,
-                sample_inputs,
-                str(paths.original_path),
-                input_names=list(ONNX_INPUT_NAMES),
-                output_names=list(ONNX_OUTPUT_NAMES),
-                dynamic_axes=dynamic_axes,
-                opset_version=config.opset_version,
-                do_constant_folding=True,
-                dynamo=False,
-            )
+            if config.exporter is OnnxExporterKind.DYNAMO:
+                torch.onnx.export(
+                    module,
+                    sample_inputs,
+                    str(paths.original_path),
+                    input_names=list(ONNX_INPUT_NAMES),
+                    output_names=list(ONNX_OUTPUT_NAMES),
+                    dynamic_shapes=dynamic_shapes,
+                    opset_version=config.opset_version,
+                    do_constant_folding=True,
+                    dynamo=True,
+                )
+            else:
+                torch.onnx.export(
+                    module,
+                    sample_inputs,
+                    str(paths.original_path),
+                    input_names=list(ONNX_INPUT_NAMES),
+                    output_names=list(ONNX_OUTPUT_NAMES),
+                    dynamic_axes=dynamic_axes,
+                    opset_version=config.opset_version,
+                    do_constant_folding=True,
+                    dynamo=False,
+                )
 
         checker_status, checker_error = _check_onnx_model(paths.original_path)
         if checker_status == "failed":
@@ -279,6 +322,7 @@ def _export_result(
         success=success,
         model_name=config.model_name,
         shape_mode=config.shape_mode,
+        exporter=config.exporter,
         opset_version=config.opset_version,
         sample_input_shape=config.sample_input_shape,
         original_path=paths.original_path,
@@ -291,6 +335,7 @@ def _export_result(
         error=error,
         simplification_error=simplification_error,
         checker_error=checker_error,
+        metadata={"dynamic_hw_multiple": config.dynamic_hw_multiple},
     )
 
 
@@ -351,6 +396,16 @@ def _validate_opset_version(opset_version: object) -> int:
     return opset_version
 
 
+def _validate_optional_positive_int(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OnnxExportValidationError(f"{label} must be a positive integer.")
+    if value <= 0:
+        raise OnnxExportValidationError(f"{label} must be a positive integer.")
+    return value
+
+
 def _validate_timestep(timestep: object) -> float:
     if isinstance(timestep, bool) or not isinstance(timestep, int | float):
         raise OnnxExportValidationError("timestep must be numeric.")
@@ -368,6 +423,16 @@ def _coerce_shape_mode(shape_mode: OnnxShapeMode | str) -> OnnxShapeMode:
     except ValueError as exc:
         allowed = ", ".join(mode.value for mode in OnnxShapeMode)
         raise OnnxExportValidationError(f"Unsupported ONNX shape mode: {shape_mode!r}. Allowed: {allowed}.") from exc
+
+
+def _coerce_exporter_kind(exporter: OnnxExporterKind | str) -> OnnxExporterKind:
+    if isinstance(exporter, OnnxExporterKind):
+        return exporter
+    try:
+        return OnnxExporterKind(str(exporter))
+    except ValueError as exc:
+        allowed = ", ".join(kind.value for kind in OnnxExporterKind)
+        raise OnnxExportValidationError(f"Unsupported ONNX exporter: {exporter!r}. Allowed: {allowed}.") from exc
 
 
 def _validate_artifact_name(value: str, label: str) -> str:

@@ -190,6 +190,7 @@ Stage 2 ONNX export output root. Export commands write model/version-oriented su
 
 - `stage2_5_m2_export112/` — Milestone 2 EMA legacy dynamic-axes re-export probe at `112x112`; investigation artifact, not a preferred serving artifact.
 - `stage2_5_m2_dynamo_after_cache_patch/` — Milestone 2 EMA dynamo-export probe; static-H/W `112x112` investigation artifact with external data, not a preferred serving artifact.
+- `stage2_5_task_2_5_dynamo/` — Task 2.5 EMA dynamo-export trial artifacts, including accepted constrained-dynamic opset 18 artifact `ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx` with symbolic `112*height_units` and `112*width_units`.
 
 ## `outputs/`
 
@@ -200,6 +201,7 @@ Generated reports and local workflow artifacts.
 Stage 2 ONNX Runtime validation output root. `ema validate-onnx` and `rife validate-onnx` write per-model `equivalence_report.json`, `equivalence_metrics.csv`, and optional sample PyTorch/ONNX/difference PNGs for tensor mismatches.
 
 - `stage2_5_m2/` — Milestone 2 EMA ONNX investigation reports for legacy dynamic failure, 56-multiple padding probes, larger legacy re-export, and modern dynamo-export probe.
+- `stage2_5_task_2_5/` — Task 2.5 EMA dynamic ONNX refactor trial artifacts: pre/post PyTorch identity tensors, accepted divisor-112 constrained-dynamic ORT validation report, failed divisor-32 probe, and pre-trial tracked diff snapshot.
 
 ## `src/video_interpolation/`
 
@@ -209,12 +211,12 @@ Local Stage 1 Python package.
 - `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, factor-aware output path layout, MLflow run naming, and per-target measurement CSV export including runtime options.
 - `baselines.py` — duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
 - `amt_preflight.py` — lightweight AMT-S import/model/checkpoint compatibility check.
-- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, request-time Practical-RIFE scale options, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export and ONNX Runtime validation commands, EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
+- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, request-time Practical-RIFE scale options, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export and ONNX Runtime validation commands, EMA dynamo-export options (`--exporter`, `--dynamic-hw-multiple`, `--artifact-stem`) and EMA validation padding override (`--divisor`), EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
 - `contracts.py` — compact artifact contracts and relative-path validation helpers.
 - `data/` — source preprocessing and source-level indexing code.
 - `ema_preflight.py` — lightweight EMA-VFI-small import/checkpoint compatibility check.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
-- `inference_runtime/` — Stage 2 request/result inference API, interpolation mode validation, runtime input/output containers, and backend abstractions.
+- `inference_runtime/` — Stage 2 request/result inference API, interpolation mode validation, runtime input/output containers, backend abstractions, ONNX export configuration including selectable legacy/dynamo exporters and constrained dynamic H/W multiples, and ONNX validation reports with graph I/O plus padded/output shape metadata.
 - `inference.py` — shared local video inference workflow using Stage 2 request/result calls when adapters support them, fixed 2x/arbitrary Nx frame interleaving for EMA/RIFE, request runtime options such as Practical-RIFE scale, PyAV/FFmpeg output encoding, audio remuxing, and legacy fixed-2x adapter fallback.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
 - `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs.

@@ -7,10 +7,12 @@ from video_interpolation.inference_runtime.onnx_export import (
     EMAVFIOnnxWrapper,
     OnnxExportConfig,
     OnnxExportValidationError,
+    OnnxExporterKind,
     OnnxShapeMode,
     PracticalRIFEOnnxWrapper,
     create_sample_onnx_inputs,
     dynamic_axes_for_config,
+    dynamic_shapes_for_config,
     export_torch_module_to_onnx,
     resolve_onnx_artifact_paths,
 )
@@ -29,6 +31,7 @@ def test_onnx_export_config_validates_shape_mode_and_artifact_paths(tmp_path: Pa
     paths = resolve_onnx_artifact_paths(config)
 
     assert config.shape_mode is OnnxShapeMode.DYNAMIC_HW
+    assert config.exporter is OnnxExporterKind.LEGACY
     assert config.sample_input_shape == (1, 3, 32, 48)
     assert paths.output_dir == tmp_path / "ema_vfi_small"
     assert paths.original_path.name == "ema_vfi_small_dynamic_hw_opset17.onnx"
@@ -41,6 +44,17 @@ def test_onnx_export_config_validates_shape_mode_and_artifact_paths(tmp_path: Pa
         shape_mode=OnnxShapeMode.STATIC,
     )
     assert dynamic_axes_for_config(static_config) is None
+    assert dynamic_shapes_for_config(static_config) is None
+
+    dynamo_config = OnnxExportConfig(
+        model_name="ema_vfi_small",
+        output_dir=tmp_path,
+        exporter="dynamo",
+        dynamic_hw_multiple=112,
+    )
+    assert dynamo_config.exporter is OnnxExporterKind.DYNAMO
+    assert dynamo_config.dynamic_hw_multiple == 112
+    assert dynamic_shapes_for_config(dynamo_config) is not None
 
 
 def test_onnx_export_config_resolves_relative_output_dir_before_later_cwd_changes(
@@ -67,6 +81,8 @@ def test_onnx_export_config_resolves_relative_output_dir_before_later_cwd_change
         ({"model_name": "unit", "sample_input_shape": (1, 3, 8)}, "four dimensions"),
         ({"model_name": "unit", "opset_version": 10}, "opset_version"),
         ({"model_name": "unit", "shape_mode": "batch_only"}, "shape mode"),
+        ({"model_name": "unit", "exporter": "future"}, "exporter"),
+        ({"model_name": "unit", "dynamic_hw_multiple": 0}, "dynamic_hw_multiple"),
         ({"model_name": "unit", "timestep": 1.0}, "timestep"),
     ],
 )
@@ -129,6 +145,8 @@ def test_export_torch_module_to_onnx_writes_original_artifact_without_simplifica
     result = export_torch_module_to_onnx(_TinyOnnxModule(), config)
 
     assert result.success
+    assert result.exporter is OnnxExporterKind.LEGACY
+    assert result.metadata["dynamic_hw_multiple"] is None
     assert result.original_path.is_file()
     assert result.preferred_path == result.original_path
     assert result.simplification_status == "not_requested"

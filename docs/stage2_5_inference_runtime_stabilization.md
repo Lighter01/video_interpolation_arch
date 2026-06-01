@@ -22,7 +22,31 @@ Current EMA-VFI evidence:
 - The legacy simplified ONNX artifact runs at the export-like `32x32` shape.
 - A changed `64x64` shape fails in ONNX Runtime with a `LayerNormalization` shape mismatch.
 - Milestone 2 tested external 56-multiple padding, larger legacy re-export, and a modern dynamo export route.
-- EMA ONNX is now classified as export-size/static-like only. It is not suitable for dynamic serving, and EMA should stay on the PyTorch backend unless a broader upstream dynamic-shape rewrite is approved.
+- The follow-up Task 2.5 refactor produced a bounded constrained-dynamic EMA ONNX artifact when project-owned external padding uses divisor `112`.
+- EMA ONNX is now classified as constrained-dynamic, not fully dynamic. The existing default divisor `32` still fails and should not be used with the constrained ONNX artifact.
+
+Task 2.5 accepted EMA artifact:
+
+```text
+model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx
+```
+
+The graph exposes:
+
+```text
+left[batch, 3, 112*height_units, 112*width_units]
+right[batch, 3, 112*height_units, 112*width_units]
+timestep[batch, 1, 1, 1]
+intermediate_frame[batch, 3, 112*height_units, 112*width_units]
+```
+
+Accepted validation command:
+
+```bash
+uv run python -m video_interpolation.cli ema validate-onnx --torch-device cpu --onnx-path model_exports/onnx/stage2_5_task_2_5_dynamo/ema_vfi_small/ema_vfi_small_dynamo_dynamic_hw_opset18_h336w560.onnx --provider cpu --shape 64x64 --shape 112x168 --shape 320x512 --divisor 112 --output-dir outputs/onnx_validation/stage2_5_task_2_5/dynamo_div112_h336w560
+```
+
+Result: all three shapes passed through one artifact; mean MAE `1.0100862e-06`, max abs error `4.1246414e-05`, and unpadded output shapes matched the original H/W.
 
 Current Practical-RIFE evidence:
 
@@ -61,4 +85,4 @@ Detailed implementation remains in the active Stage 2.5 ExecPlan:
 .agent/docs/exec-plans/active/02_5_inference_runtime_stabilization.execplan.md
 ```
 
-Milestone 3 adds real-image ONNX-vs-PyTorch equivalence. It should treat EMA ONNX as deferred/PyTorch-only and focus ONNX acceptance work on Practical-RIFE unless the EMA upstream dynamic-shape rewrite is reopened. True model batch inference, video chunking, ONNX batch support where viable, benchmarks, and MLflow logging are planned for later Stage 2.5 milestones.
+Milestone 3 adds real-image ONNX-vs-PyTorch equivalence. It should include Practical-RIFE as originally planned and may also validate the EMA constrained-dynamic artifact with external divisor `112`. True model batch inference, video chunking, ONNX batch support where viable, benchmarks, and MLflow logging are planned for later Stage 2.5 milestones.

@@ -23,10 +23,17 @@ def _cache_key_for_grid(tenFlow):
     return key
 
 
+def _normalised_axis(length, device, dtype):
+    values = torch.arange(length, device=device, dtype=dtype)
+    if not _is_exporting() and length == 1:
+        return torch.zeros_like(values)
+    return values * (2.0 / (length - 1)) - 1.0
+
+
 def _make_grid(tenFlow):
-    tenHorizontal = torch.linspace(-1.0, 1.0, tenFlow.shape[3], device=tenFlow.device, dtype=tenFlow.dtype).view(
+    tenHorizontal = _normalised_axis(tenFlow.shape[3], tenFlow.device, tenFlow.dtype).view(
         1, 1, 1, tenFlow.shape[3]).expand(tenFlow.shape[0], -1, tenFlow.shape[2], -1)
-    tenVertical = torch.linspace(-1.0, 1.0, tenFlow.shape[2], device=tenFlow.device, dtype=tenFlow.dtype).view(
+    tenVertical = _normalised_axis(tenFlow.shape[2], tenFlow.device, tenFlow.dtype).view(
         1, 1, tenFlow.shape[2], 1).expand(tenFlow.shape[0], -1, -1, tenFlow.shape[3])
     return torch.cat([tenHorizontal, tenVertical], 1)
 

@@ -98,6 +98,7 @@ from .inference_runtime.onnx_export import (
     DEFAULT_ONNX_OPSET_VERSION,
     OnnxExportConfig,
     OnnxExportResult,
+    OnnxExporterKind,
     OnnxShapeMode,
     export_ema_runtime_onnx,
     export_rife_runtime_onnx,
@@ -684,6 +685,22 @@ def ema_export_onnx(
         "--shape-mode",
         help="ONNX input shape policy: dynamic_hw or static.",
     ),
+    exporter: str = typer.Option(
+        OnnxExporterKind.LEGACY.value,
+        "--exporter",
+        help="Torch ONNX exporter implementation: legacy or dynamo.",
+    ),
+    artifact_stem: str | None = typer.Option(
+        None,
+        "--artifact-stem",
+        help="Override output ONNX filename stem without extension.",
+    ),
+    dynamic_hw_multiple: int | None = typer.Option(
+        None,
+        "--dynamic-hw-multiple",
+        min=1,
+        help="Constrain dynamo dynamic H/W to this external padding multiple.",
+    ),
     batch_size: int = typer.Option(1, "--batch-size", min=1, help="Sample export batch size."),
     height: int = typer.Option(32, "--height", min=1, help="Sample prepared/padded input height."),
     width: int = typer.Option(32, "--width", min=1, help="Sample prepared/padded input width."),
@@ -704,9 +721,12 @@ def ema_export_onnx(
             sample_input_shape=(batch_size, 3, height, width),
             opset_version=opset_version,
             shape_mode=shape_mode,
+            exporter=exporter,
+            dynamic_hw_multiple=dynamic_hw_multiple,
             device=device,
             timestep=timestep,
             simplify=simplify,
+            artifact_stem=artifact_stem,
         )
         adapter = EMAVFIAdapter(adapter_config)
         adapter.load_checkpoint(checkpoint_path)
@@ -768,6 +788,12 @@ def ema_validate_onnx(
         help="Runtime interpolation factor used for validation.",
     ),
     torch_device: str = typer.Option("cpu", "--torch-device", help="Torch device used for PyTorch comparison."),
+    divisor: int | None = typer.Option(
+        None,
+        "--divisor",
+        min=1,
+        help="Override EMA external padding divisor for both PyTorch and ONNX validation.",
+    ),
     output_dir: Path = typer.Option(
         Path("outputs/onnx_validation"),
         "--output-dir",
@@ -786,6 +812,8 @@ def ema_validate_onnx(
     onnx_runtime = None
     try:
         adapter_config = replace(EMAVFIAdapterConfig.from_mapping(_load_yaml_mapping(config)), device=torch_device)
+        if divisor is not None:
+            adapter_config = replace(adapter_config, divisor=divisor)
         artifact_path = resolve_preferred_onnx_artifact_path(
             adapter_config.model_name,
             artifact_root=artifact_root,
@@ -2585,6 +2613,8 @@ def _print_onnx_export_result(title: str, result: OnnxExportResult) -> None:
     table.add_column("Value")
     table.add_row("model", result.model_name)
     table.add_row("shape mode", result.shape_mode.value)
+    table.add_row("exporter", result.exporter.value)
+    table.add_row("dynamic H/W multiple", str(result.metadata.get("dynamic_hw_multiple") or ""))
     table.add_row("sample shape", "x".join(str(value) for value in result.sample_input_shape))
     table.add_row("opset", str(result.opset_version))
     table.add_row("original", str(result.original_path))
