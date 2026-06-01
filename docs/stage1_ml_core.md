@@ -1,6 +1,6 @@
 # Stage 1 ML Core
 
-This document tracks the implemented Stage 1 developer workflow. Milestone 1 adds the project skeleton, runtime settings, compact artifact contracts, and an EMA-VFI-small compatibility preflight. Milestone 2 adds raw-video preprocessing and source-level indexing commands. Milestone 3 adds global sequence-index construction and manifest-only dataset version building. Milestones 4 and 5 add triplet manifest loading, metrics, baseline evaluation, and MLflow tracking infrastructure.
+This document tracks the implemented Stage 1 developer workflow. Milestone 1 adds the project skeleton, runtime settings, compact artifact contracts, and an EMA-VFI-small compatibility preflight. Milestone 2 adds raw-video preprocessing and source-level indexing commands. Milestone 3 adds global sequence-index construction and manifest-only dataset version building. Milestones 4 and 5 add triplet manifest loading, metrics, baseline evaluation, and MLflow tracking infrastructure. Milestones 6 and 7 add EMA-VFI-small adapter/inference/fine-tuning/candidate validation. Milestone 8 adds AMT-S adapter, eval-only/candidate validation, and local video inference. Milestone 9 adds Practical-RIFE v4.25 adapter, eval-only/candidate validation, and local video inference.
 
 ## Runtime Settings
 
@@ -34,6 +34,63 @@ uv run python -m video_interpolation.cli ema-preflight
 ```
 
 The preflight checks the EMA-VFI repository path, the `ours_small.pkl` checkpoint path, Torch import, EMA-VFI imports, and whether the current runtime can initialize/load the upstream model. If CUDA is unavailable, the command reports a clear blocked status because the upstream EMA-VFI `Trainer.Model` currently hardcodes CUDA setup.
+
+### `infer-all-videos`
+
+Purpose: run every implemented Stage 1 inference target over every supported video in a required input directory. Current targets are Practical-RIFE v4.25, AMT-S, EMA-VFI-small, and the `duplicate_left`, `blend`, and `farneback` baselines.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli infer-all-videos [--input-dir PATH] [--output-root PATH] [--limit-videos N] [--limit-pairs N] [--codec CODEC] [--target NAME]... [--disable-mlflow] [--continue-on-error/--fail-fast]
+```
+
+Inputs and flags:
+
+- `--input-dir PATH`: required directory to scan recursively for videos. There is intentionally no default input directory.
+- `--output-root PATH`: output root. Default: `outputs/inference`.
+- `--limit-videos N`: optional cap on discovered videos for smoke runs.
+- `--limit-pairs N`: optional cap on neighboring frame pairs per video, passed to every individual inference run.
+- `--codec CODEC`: optional FFmpeg/PyAV encoder override for all outputs. Use `libx264` for a CPU-compatible smoke run.
+- `--target NAME` or `--method NAME`: repeatable selector. If omitted, runs every target.
+- `--disable-mlflow`: disables MLflow logging for every individual run.
+- `--continue-on-error/--fail-fast`: default is `--continue-on-error`, so one failed target does not prevent other outputs from being written.
+
+Target values:
+
+- Models: `practical_rife_v4_25`, `amt_s`, `ema_vfi_small`.
+- Model aliases: `rife`, `amt`, `ema`.
+- Baselines: `baseline_duplicate_left`, `baseline_blend`, `baseline_farneback`.
+- Baseline aliases: `duplicate_left`, `blend`, `farneback`.
+- Groups: `models`, `baselines`, `all`.
+
+Example:
+
+```bash
+uv run python -m video_interpolation.cli infer-all-videos \
+  --input-dir raw_data/tmp_test \
+  --codec libx264 \
+  --disable-mlflow
+
+uv run python -m video_interpolation.cli infer-all-videos \
+  --input-dir raw_data/tmp_test \
+  --target ema \
+  --target blend \
+  --codec libx264 \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes generated videos under `outputs/inference` by default.
+- Output layout is `outputs/inference/<model_name>/<relative_input_dir>/<video_stem>_2x.mp4` for neural models.
+- Baseline output layout is `outputs/inference/baselines/<baseline_name>/<relative_input_dir>/<video_stem>_2x.mp4`.
+- Each target directory also gets `inference_measurements.csv` with one row per input video.
+- Preserves relative subdirectories from `--input-dir` to avoid filename collisions.
+- Reuses the same PyAV/FFmpeg writer, audio remuxing, frame ordering, timing metrics, and MLflow behavior as the single-video commands.
+- Prints a final summary table with every target/video status and output path. If any run fails, the command exits non-zero after the summary.
+
+Measurement CSV fields include input/output video paths, status, pair and frame counts, input/output FPS, `model_inference_elapsed_sec`, `total_elapsed_sec`, model and total pairs/sec, audio stream preservation counts, MLflow run id, and error text for failed runs.
 
 ### `ema adapter-check`
 
@@ -70,7 +127,7 @@ Purpose: run local 2x video inference with EMA-VFI-small by inserting one genera
 Syntax:
 
 ```bash
-uv run python -m video_interpolation.cli ema infer-video [--config PATH] [--input PATH] [--output PATH] [--limit-pairs N] [--checkpoint PATH] [--disable-mlflow]
+uv run python -m video_interpolation.cli ema infer-video [--config PATH] [--input PATH] [--output PATH] [--limit-pairs N] [--checkpoint PATH] [--codec CODEC] [--disable-mlflow]
 ```
 
 Inputs:
@@ -79,6 +136,8 @@ Inputs:
 - Input video from config or `--input`. Config default: `raw_data/tmp_test/Dora.mp4`.
 - EMA repository under `MODEL_REPOS_ROOT`, default `model_repos/EMA-VFI`.
 - EMA checkpoint from config or `--checkpoint`. Config default: `MODEL_WEIGHTS_ROOT/EMA-VFI/ours_small.pkl`.
+- PyAV/FFmpeg encoder from config or `--codec`. Config default: `h264_nvenc`; CPU fallback: `libx264`.
+- Output container from config `container`. Config default: `null`, so PyAV infers from `output_path`.
 - CUDA runtime for model loading and inference.
 - MLflow tracking server when MLflow logging is enabled.
 
@@ -89,6 +148,7 @@ Flags:
 - `--output PATH`: overrides the output video path from the config. If omitted, uses config `output_path`, default `outputs/inference/ema_vfi_small/dora_2x.mp4`.
 - `--limit-pairs N`: processes only the first `N` neighboring frame pairs. Default: config `limit_pairs`, currently `null`, meaning process all readable pairs.
 - `--checkpoint PATH`: overrides the EMA checkpoint path. Relative paths resolve under `MODEL_WEIGHTS_ROOT`; default `EMA-VFI/ours_small.pkl`.
+- `--codec CODEC`: overrides the FFmpeg/PyAV encoder name. Examples: `libx264`, `h264_nvenc`, `libx265`, `hevc_nvenc`. `mp4v` is rejected because it is an OpenCV fourcc.
 - `--disable-mlflow`: skips MLflow logging for local smoke runs. Default: disabled, so config `mlflow.enabled` controls logging.
 
 Safe smoke example:
@@ -96,8 +156,9 @@ Safe smoke example:
 ```bash
 uv run python -m video_interpolation.cli ema infer-video \
   --config configs/inference/ema_vfi_small_2x.yaml \
-  --input raw_data/tmp_test/Dora.mp4 \
+  --input raw_data/tmp_test/DORA_cut.mp4 \
   --output /tmp/dora_ema_2x.mp4 \
+  --codec libx264 \
   --limit-pairs 2 \
   --disable-mlflow
 ```
@@ -107,7 +168,10 @@ Side effects and outputs:
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
 - Output FPS defaults to `input_fps * 2.0`.
-- Logs params, counts, output video, and config to MLflow unless disabled.
+- Encodes with PyAV/FFmpeg and preserves/remuxes input audio streams when they are compatible with the selected output container.
+- With `--limit-pairs`, writes a partial smoke output and caps remuxed audio to that partial output duration.
+- Measures model inference time around EMA `predict_pair()` calls and total command processing time including decode/write/setup.
+- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
 - Requires CUDA for the current EMA adapter.
 
 Inspect success:
@@ -226,6 +290,229 @@ cat /tmp/ema_candidate_validation_smoke/candidate_validation_report.json
 head -5 /tmp/ema_candidate_validation_smoke/metrics.csv
 find /tmp/ema_candidate_validation_smoke/sample_predictions -type f | head
 ```
+
+## AMT-S
+
+Milestone 8 adds AMT-S eval/inference integration through the same adapter, manifest, metrics, candidate-validation, PyAV video writer, and MLflow patterns already used by EMA-VFI-small.
+
+AMT-S fine-tuning is deferred for now. Upstream AMT training on Vimeo expects optical-flow supervision files under a `flow/` directory and includes a flow loss. The current project manifests contain image triplets only, so generating flow artifacts or changing AMT loss policy needs an explicit follow-up decision.
+
+### `amt-preflight`
+
+Purpose: check whether AMT-S can be imported, initialized, and loaded from the local `amt-s.pth` checkpoint.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli amt-preflight [--config PATH] [--fail-on-blocked]
+```
+
+Inputs:
+
+- Adapter YAML, default `configs/models/amt_s.yaml`.
+- AMT repository under `MODEL_REPOS_ROOT`, default `model_repos/AMT`.
+- Upstream AMT config, default `model_repos/AMT/cfgs/AMT-S.yaml`.
+- AMT-S checkpoint, default `MODEL_WEIGHTS_ROOT/AMT/amt-s.pth`.
+- CUDA runtime when `device: cuda`.
+
+Flags:
+
+- `--config PATH`: AMT adapter config path. Default: `configs/models/amt_s.yaml`.
+- `--fail-on-blocked`: exits with a non-zero status when CUDA or another prerequisite blocks the check. Default: disabled.
+
+Side effects and outputs:
+
+- No files are written.
+- Prints repository path, config path, checkpoint path, Torch version, CUDA status, AMT import status, model initialization status, and checkpoint-load status.
+- Releases model references and CUDA cache after the check.
+
+### `amt adapter-check`
+
+Purpose: check AMT-S adapter prerequisites without running inference over media or manifests.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli amt adapter-check [--config PATH] [--fail-on-blocked]
+```
+
+Flags:
+
+- `--config PATH`: AMT adapter config path. Default: `configs/models/amt_s.yaml`.
+- `--fail-on-blocked`: exits with non-zero status when the adapter is blocked. Default: disabled.
+
+### `amt infer-video`
+
+Purpose: run local 2x video inference with AMT-S by inserting one generated frame between every neighboring input-frame pair.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli amt infer-video [--config PATH] [--input PATH] [--output PATH] [--limit-pairs N] [--checkpoint PATH] [--codec CODEC] [--disable-mlflow]
+```
+
+Inputs and flags match `ema infer-video`, except the default config is `configs/inference/amt_s_2x.yaml` and the model fields come from `configs/models/amt_s.yaml`.
+
+Safe smoke example:
+
+```bash
+uv run python -m video_interpolation.cli amt infer-video \
+  --config configs/inference/amt_s_2x.yaml \
+  --input raw_data/tmp_test/Dora.mp4 \
+  --output /tmp/dora_amt_2x.mp4 \
+  --codec libx264 \
+  --limit-pairs 1 \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes a new video to `output_path`.
+- Interleaves original and generated frames as `left, generated_middle, right, ...`.
+- Encodes with PyAV/FFmpeg and preserves/remuxes compatible input audio streams.
+- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
+
+### `amt validate-candidate`
+
+Purpose: evaluate AMT-S on `test_all.csv`, write metrics/artifacts, and approve or reject based on configured thresholds. This is also the Milestone 8 AMT-S eval-only smoke path.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli amt validate-candidate [--config PATH] [--manifest PATH] [--output-dir PATH] [--limit-samples N] [--checkpoint PATH] [--no-lpips] [--disable-mlflow]
+```
+
+Inputs and flags match `ema validate-candidate`, except the default config is `configs/validation/amt_s_candidate.yaml` and the model fields come from `configs/models/amt_s.yaml`.
+
+Safe smoke example:
+
+```bash
+uv run python -m video_interpolation.cli amt validate-candidate \
+  --config configs/validation/amt_s_candidate.yaml \
+  --manifest dataset_versions/stage1_default/test_all.csv \
+  --output-dir /tmp/amt_candidate_validation_smoke \
+  --limit-samples 1 \
+  --no-lpips \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes `metrics.csv`, `metrics_summary.csv`, and `candidate_validation_report.json`.
+- Writes optional visual comparison folders under `sample_predictions/<candidate_id>/<sample_id>/`.
+- Each saved sample contains `im1.png`, `im2_gt.png`, `im2_generated.png`, and `im3.png`.
+- Logs params, metrics, report, CSVs, manifest/config, and sample predictions to MLflow unless disabled.
+
+## Practical-RIFE
+
+Milestone 9 adds Practical-RIFE v4.25 eval/inference integration through the same adapter, manifest, metrics, candidate-validation, PyAV video writer, and MLflow patterns used by EMA-VFI-small and AMT-S.
+
+Practical-RIFE fine-tuning is deferred for now. Upstream Practical-RIFE training uses hardcoded `/data` paths, nori/S3-style dataset access, distributed CUDA assumptions, TensorBoard logging, and a training model path that is separate from the shipped `train_log` inference weights. Adapting this correctly needs an explicit follow-up decision.
+
+### `rife-preflight`
+
+Purpose: check whether Practical-RIFE can be imported, initialized, and loaded from the local v4.25 `train_log` checkpoint directory.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli rife-preflight [--config PATH] [--fail-on-blocked]
+```
+
+Inputs:
+
+- Adapter YAML, default `configs/models/practical_rife_v4_25.yaml`.
+- Practical-RIFE repository under `MODEL_REPOS_ROOT`, default `model_repos/Practical-RIFE`.
+- Practical-RIFE v4.25 checkpoint directory, default `MODEL_WEIGHTS_ROOT/Practical-RIFE/RIFEv4.25/train_log`.
+- CUDA runtime when `device: cuda`.
+
+Flags:
+
+- `--config PATH`: Practical-RIFE adapter config path. Default: `configs/models/practical_rife_v4_25.yaml`.
+- `--fail-on-blocked`: exits with a non-zero status when CUDA or another prerequisite blocks the check. Default: disabled.
+
+Side effects and outputs:
+
+- No files are written.
+- Prints repository path, checkpoint directory/file paths, Torch version, CUDA status, import status, model initialization status, and checkpoint-load status.
+- Releases model references and CUDA cache after the check.
+
+### `rife adapter-check`
+
+Purpose: check Practical-RIFE adapter prerequisites without running inference over media or manifests.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli rife adapter-check [--config PATH] [--fail-on-blocked]
+```
+
+Flags:
+
+- `--config PATH`: Practical-RIFE adapter config path. Default: `configs/models/practical_rife_v4_25.yaml`.
+- `--fail-on-blocked`: exits with non-zero status when the adapter is blocked. Default: disabled.
+
+### `rife infer-video`
+
+Purpose: run local 2x video inference with Practical-RIFE v4.25 by inserting one generated frame between every neighboring input-frame pair.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli rife infer-video [--config PATH] [--input PATH] [--output PATH] [--limit-pairs N] [--checkpoint PATH] [--codec CODEC] [--disable-mlflow]
+```
+
+Inputs and flags match `ema infer-video`, except the default config is `configs/inference/practical_rife_v4_25_2x.yaml` and the model fields come from `configs/models/practical_rife_v4_25.yaml`.
+
+Safe smoke example:
+
+```bash
+uv run python -m video_interpolation.cli rife infer-video \
+  --config configs/inference/practical_rife_v4_26_2x.yaml \
+  --input raw_data/tmp_test/DORA_cut.mp4 \
+  --output /tmp/dora_rife_2x.mp4 \
+  --codec libx264 \
+  --limit-pairs 1 \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes a new video to `output_path`.
+- Interleaves original and generated frames as `left, generated_middle, right, ...`.
+- Encodes with PyAV/FFmpeg and preserves/remuxes compatible input audio streams.
+- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
+
+### `rife validate-candidate`
+
+Purpose: evaluate Practical-RIFE v4.25 on `test_all.csv`, write metrics/artifacts, and approve or reject based on configured thresholds. This is also the Milestone 9 Practical-RIFE eval-only smoke path.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli rife validate-candidate [--config PATH] [--manifest PATH] [--output-dir PATH] [--limit-samples N] [--checkpoint PATH] [--no-lpips] [--disable-mlflow]
+```
+
+Inputs and flags match `ema validate-candidate`, except the default config is `configs/validation/practical_rife_v4_25_candidate.yaml` and the model fields come from `configs/models/practical_rife_v4_25.yaml`.
+
+Safe smoke example:
+
+```bash
+uv run python -m video_interpolation.cli rife validate-candidate \
+  --config configs/validation/practical_rife_v4_25_candidate.yaml \
+  --manifest dataset_versions/stage1_default/test_all.csv \
+  --output-dir /tmp/rife_candidate_validation_smoke \
+  --limit-samples 1 \
+  --no-lpips \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes `metrics.csv`, `metrics_summary.csv`, and `candidate_validation_report.json`.
+- Writes optional visual comparison folders under `sample_predictions/<candidate_id>/<sample_id>/`.
+- Each saved sample contains `im1.png`, `im2_gt.png`, `im2_generated.png`, and `im3.png`.
+- Logs params, metrics, report, CSVs, manifest/config, and sample predictions to MLflow unless disabled.
 
 ### `data index-vimeo-triplets`
 
@@ -493,6 +780,49 @@ Common failures:
 - MLflow logging is enabled but the tracking server is not running.
 - Manifest paths or frame paths are invalid.
 
+### `baseline infer-video`
+
+Purpose: run local 2x video inference with one baseline method so baseline-generated videos can be compared with neural model outputs.
+
+Syntax:
+
+```bash
+uv run python -m video_interpolation.cli baseline infer-video [--config PATH] [--input PATH] [--output PATH] [--baseline NAME] [--limit-pairs N] [--codec CODEC] [--disable-mlflow]
+```
+
+Inputs:
+
+- `--config`: YAML config, default `configs/inference/baseline_2x.yaml`.
+- `--input`: optional input video override.
+- `--output`: optional output video override.
+
+Flags:
+
+- `--baseline NAME`: allowed values are `duplicate_left`, `blend`, and `farneback`; overrides `model.baseline_name` from config.
+- `--limit-pairs N`: positive cap on interpolated neighboring frame pairs for smoke runs.
+- `--codec CODEC`: FFmpeg/PyAV encoder override, for example `libx264` or `h264_nvenc`.
+- `--disable-mlflow`: skips MLflow logging for tiny local tests.
+
+Safe smoke example:
+
+```bash
+uv run python -m video_interpolation.cli baseline infer-video \
+  --config configs/inference/baseline_2x.yaml \
+  --baseline farneback \
+  --input raw_data/tmp_test/Dora.mp4 \
+  --output /tmp/dora_farneback_2x.mp4 \
+  --codec libx264 \
+  --limit-pairs 1 \
+  --disable-mlflow
+```
+
+Side effects and outputs:
+
+- Writes a new video to `output_path`.
+- Interleaves original and generated frames as `left, generated_middle, right, ...`.
+- Uses the same PyAV/FFmpeg writer and audio remuxing path as model inference.
+- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
+
 ### `mlflow smoke-log`
 
 Purpose: verify that local Python code can log a minimal run to `MLFLOW_TRACKING_URI`.
@@ -623,8 +953,9 @@ Detailed field documentation lives in `configs/data/README.md`.
 Implemented baseline configs:
 
 - `configs/baselines/baseline_eval.yaml` for duplication, blending, and Farneback baseline evaluation on a triplet manifest.
+- `configs/inference/baseline_2x.yaml` for local 2x video inference with one baseline method.
 
-Detailed field documentation lives in `configs/baselines/README.md`.
+Detailed field documentation lives in `configs/baselines/README.md` and `configs/inference/README.md`.
 
 ## EMA-VFI-small Configs
 
@@ -636,6 +967,19 @@ Implemented EMA configs:
 - `configs/validation/ema_vfi_small_candidate.yaml` for candidate validation thresholds, outputs, prediction samples, and MLflow behavior.
 
 Detailed field documentation lives in `configs/models/README.md`, `configs/inference/README.md`, `configs/training/README.md`, and `configs/validation/README.md`.
+
+## AMT-S and Practical-RIFE Configs
+
+Implemented additional model configs:
+
+- `configs/models/amt_s.yaml` for AMT-S adapter, checkpoint, device, upstream config, timestep, scale, and padding settings;
+- `configs/inference/amt_s_2x.yaml` for local AMT-S 2x video inference;
+- `configs/validation/amt_s_candidate.yaml` for AMT-S candidate validation;
+- `configs/models/practical_rife_v4_25.yaml` for Practical-RIFE v4.25 adapter, checkpoint directory, device, timestep, scale, and padding settings;
+- `configs/inference/practical_rife_v4_25_2x.yaml` for local Practical-RIFE 2x video inference;
+- `configs/validation/practical_rife_v4_25_candidate.yaml` for Practical-RIFE candidate validation.
+
+AMT-S and Practical-RIFE fine-tuning are deferred. The current Stage 1 implementations cover preflight, adapter checks, eval-only/candidate validation, and local video inference for both models.
 
 ## MLflow Infrastructure
 

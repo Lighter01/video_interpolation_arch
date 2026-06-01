@@ -1,25 +1,31 @@
-import contextlib
 import gc
-import importlib
-import os
-import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from video_interpolation.adapters.base import AdapterEnvironmentReport, ModelAdapter, ModelAdapterError
+from video_interpolation.inference_runtime.api import FramePairRequest, FramePairResult, InferenceMode
+from video_interpolation.inference_runtime.rife import (
+    PracticalRIFEPyTorchRuntime,
+    PracticalRIFEPyTorchRuntimeConfig,
+    validate_rife_scale,
+)
+from video_interpolation.inference_runtime.rife_upstream import Model as RIFEModel
 from video_interpolation.settings import Settings, load_settings
 
 
 @dataclass(frozen=True)
 class PracticalRIFEAdapterConfig:
-    model_name: str = "practical_rife_v4_25"
+    model_name: str = "practical_rife_v4_26"
     repo_name: str = "Practical-RIFE"
-    checkpoint_path: Path = Path("Practical-RIFE/RIFEv4.25/train_log")
+    checkpoint_path: Path = Path("Practical-RIFE/RIFEv4.26/train_log")
+    supported_modes: tuple[str, ...] = ("fixed_2x", "arbitrary_nx")
+    default_interpolation_factor: int = 2
+    min_interpolation_factor: int = 2
+    max_interpolation_factor: int = 8
     device: str = "cuda"
     timestep: float = 0.5
     scale: float = 1.0
@@ -31,11 +37,13 @@ class PracticalRIFEAdapterConfig:
         values = dict(data or {})
         if "checkpoint_path" in values:
             values["checkpoint_path"] = Path(values["checkpoint_path"])
+        if "supported_modes" in values:
+            values["supported_modes"] = tuple(str(mode) for mode in values["supported_modes"])
         return cls(**values)
 
 
 class PracticalRIFEAdapter(ModelAdapter):
-    """Stage 1 adapter for Practical-RIFE v4.25 eval/inference from local weights."""
+    """Adapter for Practical-RIFE eval/inference from local weights."""
 
     def __init__(
         self,
@@ -46,8 +54,7 @@ class PracticalRIFEAdapter(ModelAdapter):
         self.settings = settings or load_settings()
         self.model_name = self.config.model_name
         self._model: Any | None = None
-        self._repo_context: contextlib.AbstractContextManager[None] | None = None
-        self._repo_context_entered = False
+        self._runtime: PracticalRIFEPyTorchRuntime | None = None
         self._device = torch.device(self.config.device)
 
     @property
@@ -81,16 +88,7 @@ class PracticalRIFEAdapter(ModelAdapter):
             "ok" if self.checkpoint_file_path.is_file() else "failed",
             str(self.checkpoint_file_path),
         )
-        report.add(
-            "rife_model_file",
-            "ok" if (self.checkpoint_path / "RIFE_HDv3.py").is_file() else "failed",
-            str(self.checkpoint_path / "RIFE_HDv3.py"),
-        )
-        report.add(
-            "rife_ifnet_file",
-            "ok" if (self.checkpoint_path / "IFNet_HDv3.py").is_file() else "failed",
-            str(self.checkpoint_path / "IFNet_HDv3.py"),
-        )
+        report.add("rife_runtime_source", "ok", "video_interpolation.inference_runtime.rife_upstream")
         report.add("torch_import", "ok", f"torch {torch.__version__}")
         if self.config.device == "cuda" and not torch.cuda.is_available():
             report.add("cuda_available", "blocked", "CUDA is unavailable for configured Practical-RIFE device.")
@@ -106,12 +104,8 @@ class PracticalRIFEAdapter(ModelAdapter):
             return report
 
         try:
-            with _rife_import_context(self.repo_path, self.weight_package_root):
-                importlib.import_module("model.warplayer")
-                importlib.import_module("model.loss")
-                importlib.import_module("train_log.IFNet_HDv3")
-                importlib.import_module("train_log.RIFE_HDv3")
-            report.add("rife_import", "ok", "Imported Practical-RIFE model modules and selected train_log code")
+            RIFEModel(device="cpu")
+            report.add("rife_import", "ok", "Imported project-owned Practical-RIFE runtime source")
         except Exception as exc:  # pragma: no cover - environment smoke coverage.
             report.add("rife_import", "failed", f"{type(exc).__name__}: {exc}")
         return report
@@ -122,10 +116,8 @@ class PracticalRIFEAdapter(ModelAdapter):
         if self.config.device == "cuda" and not torch.cuda.is_available():
             raise ModelAdapterError("CUDA is unavailable for Practical-RIFE with device=cuda.")
         try:
-            self._enter_repo_context()
-            rife_module = importlib.import_module("train_log.RIFE_HDv3")
-            _set_rife_module_devices(self._device)
-            self._model = rife_module.Model()
+            self._model = RIFEModel(device=self._device)
+            self._runtime = None
             self.eval()
         except Exception:
             self.close()
@@ -140,6 +132,10 @@ class PracticalRIFEAdapter(ModelAdapter):
                     model_name=self.config.model_name,
                     repo_name=self.config.repo_name,
                     checkpoint_path=checkpoint_path,
+                    supported_modes=self.config.supported_modes,
+                    default_interpolation_factor=self.config.default_interpolation_factor,
+                    min_interpolation_factor=self.config.min_interpolation_factor,
+                    max_interpolation_factor=self.config.max_interpolation_factor,
                     device=self.config.device,
                     timestep=self.config.timestep,
                     scale=self.config.scale,
@@ -161,6 +157,7 @@ class PracticalRIFEAdapter(ModelAdapter):
                 "Practical-RIFE strict checkpoint loading reported mismatched keys: "
                 f"missing={missing}, unexpected={unexpected}"
             )
+        self._runtime = None
         self.eval()
 
     def save_checkpoint(self, checkpoint_path: Path) -> None:
@@ -181,31 +178,43 @@ class PracticalRIFEAdapter(ModelAdapter):
         self._model.eval()
 
     def predict_pair(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        request = FramePairRequest(left=left, right=right)
+        return self.predict_frame_pair(request).middle_frame
+
+    def predict_intermediate_frames(
+        self,
+        left: torch.Tensor,
+        right: torch.Tensor,
+        *,
+        interpolation_factor: int | None = None,
+        scale: float | None = None,
+        timesteps: Sequence[float] | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        backend_options = {}
+        if scale is not None:
+            backend_options["scale"] = validate_rife_scale(scale)
+        request = FramePairRequest(
+            left=left,
+            right=right,
+            mode=InferenceMode.ARBITRARY_NX,
+            interpolation_factor=(
+                self.config.default_interpolation_factor if interpolation_factor is None else interpolation_factor
+            ),
+            timesteps=timesteps,
+            backend_options=backend_options,
+        )
+        return self.predict_frame_pair(request).intermediate_frames
+
+    def predict_frame_pair(self, request: FramePairRequest) -> FramePairResult:
         self._require_model()
         self.eval()
-        left_batch = _prepare_image_tensor(left, self._device)
-        right_batch = _prepare_image_tensor(right, self._device)
-        if left_batch.shape != right_batch.shape:
-            raise ValueError(f"left and right tensors must have matching shape: {left.shape} vs {right.shape}")
-        left_padded, padding = _pad_to_divisor(left_batch, self.config.divisor)
-        right_padded, _ = _pad_to_divisor(right_batch, self.config.divisor)
-
-        with torch.no_grad():
-            prediction = self._model.inference(
-                left_padded,
-                right_padded,
-                self.config.timestep,
-                self.config.scale,
-            )
-            prediction = _unpad(prediction, padding)
-        return prediction[0].detach().cpu().clamp(0.0, 1.0).contiguous()
+        return self._require_runtime().predict(request)
 
     def close(self) -> None:
+        if self._runtime is not None:
+            self._runtime.close()
+        self._runtime = None
         self._model = None
-        if self._repo_context is not None and self._repo_context_entered:
-            self._repo_context.__exit__(None, None, None)
-        self._repo_context = None
-        self._repo_context_entered = False
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -214,45 +223,21 @@ class PracticalRIFEAdapter(ModelAdapter):
         if self._model is None:
             raise ModelAdapterError("Practical-RIFE model is not built. Call build_model/load_checkpoint first.")
 
-    def _enter_repo_context(self) -> None:
-        if self._repo_context_entered:
-            return
-        self._repo_context = _rife_import_context(self.repo_path, self.weight_package_root)
-        self._repo_context.__enter__()
-        self._repo_context_entered = True
-
-
-@contextlib.contextmanager
-def _rife_import_context(repo_path: Path, weight_package_root: Path) -> Iterator[None]:
-    old_cwd = Path.cwd()
-    old_path = list(sys.path)
-    tracked_prefixes = ("model", "train_log")
-    tracked_modules = {
-        name: sys.modules.get(name)
-        for name in list(sys.modules)
-        if name in tracked_prefixes or name.startswith(tuple(f"{prefix}." for prefix in tracked_prefixes))
-    }
-    try:
-        os.chdir(repo_path)
-        sys.path.insert(0, str(weight_package_root))
-        sys.path.insert(0, str(repo_path))
-        yield
-    finally:
-        os.chdir(old_cwd)
-        sys.path[:] = old_path
-        for name in list(sys.modules):
-            if name in tracked_prefixes or name.startswith(tuple(f"{prefix}." for prefix in tracked_prefixes)):
-                sys.modules.pop(name, None)
-        for name, module in tracked_modules.items():
-            if module is not None:
-                sys.modules[name] = module
-
-
-def _set_rife_module_devices(device: torch.device) -> None:
-    for module_name in ("model.warplayer", "model.loss", "train_log.IFNet_HDv3", "train_log.RIFE_HDv3"):
-        module = importlib.import_module(module_name)
-        if hasattr(module, "device"):
-            module.device = device
+    def _require_runtime(self) -> PracticalRIFEPyTorchRuntime:
+        self._require_model()
+        if self._runtime is None:
+            self._runtime = PracticalRIFEPyTorchRuntime(
+                self._model,
+                PracticalRIFEPyTorchRuntimeConfig(
+                    model_name=self.model_name,
+                    device=self._device,
+                    timestep=self.config.timestep,
+                    scale=self.config.scale,
+                    divisor=self.config.divisor,
+                ),
+            )
+            self._runtime.load()
+        return self._runtime
 
 
 def _normalise_rife_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
@@ -268,31 +253,3 @@ def _normalise_rife_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
     if not converted:
         raise ModelAdapterError("Practical-RIFE checkpoint did not contain loadable tensor weights")
     return converted
-
-
-def _prepare_image_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
-    if tensor.ndim == 3:
-        tensor = tensor.unsqueeze(0)
-    if tensor.ndim != 4 or tensor.shape[1] != 3:
-        raise ValueError(f"Expected image tensor shape CxHxW or BxCxHxW with 3 channels, got {tuple(tensor.shape)}")
-    return tensor.to(device=device, dtype=torch.float32).clamp(0.0, 1.0)
-
-
-def _pad_to_divisor(tensor: torch.Tensor, divisor: int) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
-    if divisor <= 0:
-        raise ValueError("divisor must be positive")
-    height = tensor.shape[-2]
-    width = tensor.shape[-1]
-    pad_height = ((height - 1) // divisor + 1) * divisor - height
-    pad_width = ((width - 1) // divisor + 1) * divisor - width
-    padding = (0, pad_width, 0, pad_height)
-    if pad_height == 0 and pad_width == 0:
-        return tensor, padding
-    return F.pad(tensor, padding), padding
-
-
-def _unpad(tensor: torch.Tensor, padding: tuple[int, int, int, int]) -> torch.Tensor:
-    _, pad_right, _, pad_bottom = padding
-    height = tensor.shape[-2] - pad_bottom
-    width = tensor.shape[-1] - pad_right
-    return tensor[..., :height, :width]

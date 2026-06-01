@@ -33,6 +33,12 @@ dependencies = [
     "tqdm>=4.67.3",
     "typer>=0.25.1",
     "webdataset>=1.0.2",
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+    "onnxruntime-gpu>=1.26.0",
+    "onnx-simplifier>=0.5.0",
+    "bentoml>=1.4.39",
+    "onnxscript>=0.7.0",
 ]
 
 [build-system]

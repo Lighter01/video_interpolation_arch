@@ -1,6 +1,6 @@
-model_name: practical_rife_v4_25
+model_name: practical_rife_v4_26
 repo_name: Practical-RIFE
-checkpoint_path: Practical-RIFE/RIFEv4.25/train_log
+checkpoint_path: Practical-RIFE/RIFEv4.26/train_log
 supported_modes:
   - fixed_2x
   - arbitrary_nx

@@ -13,6 +13,14 @@ import numpy as np
 from video_interpolation.adapters.base import ModelAdapter
 from video_interpolation.adapters.ema_vfi import EMAVFIAdapter, EMAVFIAdapterConfig
 from video_interpolation.image_io import tensor_to_uint8_hwc, uint8_hwc_to_tensor
+from video_interpolation.inference_runtime import (
+    FramePairRequest,
+    FramePairResult,
+    InferenceMode,
+    resolve_interpolation_timesteps,
+    validate_interpolation_factor,
+)
+from video_interpolation.inference_runtime.rife import validate_rife_scale
 from video_interpolation.mlflow import MlflowRunConfig, log_stage1_run
 from video_interpolation.settings import Settings, load_settings
 
@@ -35,6 +43,9 @@ class VideoInferenceConfig:
     output_path: Path
     model: Any = field(default_factory=EMAVFIAdapterConfig)
     limit_pairs: int | None = None
+    interpolation_mode: InferenceMode | str = InferenceMode.FIXED_2X
+    interpolation_factor: int | None = None
+    runtime_options: Mapping[str, Any] = field(default_factory=dict)
     output_fps_multiplier: float = 2.0
     codec: str = "h264_nvenc"
     container: str | None = None
@@ -55,6 +66,7 @@ class VideoInferenceConfig:
         values["input_path"] = Path(values["input_path"])
         values["output_path"] = Path(values["output_path"])
         values["model"] = model_config_factory(values.get("model"))
+        values["runtime_options"] = dict(values.get("runtime_options") or {})
         values["mlflow"] = MlflowRunConfig.from_mapping(values.get("mlflow"))
         if values.get("config_path") is not None:
             values["config_path"] = Path(values["config_path"])
@@ -63,6 +75,11 @@ class VideoInferenceConfig:
     def validate(self) -> None:
         if self.limit_pairs is not None and self.limit_pairs <= 0:
             raise ValueError("limit_pairs must be positive when set")
+        mode = self.resolved_interpolation_mode()
+        factor = self.resolved_interpolation_factor()
+        resolve_interpolation_timesteps(mode, factor)
+        _validate_model_interpolation_support(self.model, mode, factor)
+        _validate_runtime_options(self.runtime_options)
         if self.output_fps_multiplier <= 0:
             raise ValueError("output_fps_multiplier must be positive")
         if self.codec == "mp4v":
@@ -74,6 +91,27 @@ class VideoInferenceConfig:
             allowed = ", ".join(sorted(SUPPORTED_FRAME_FORMATS))
             raise ValueError(f"frame_format must be one of: {allowed}")
 
+    def resolved_interpolation_mode(self) -> InferenceMode:
+        try:
+            return InferenceMode(str(self.interpolation_mode))
+        except ValueError as exc:
+            allowed = ", ".join(mode.value for mode in InferenceMode)
+            raise ValueError(f"Unsupported interpolation_mode: {self.interpolation_mode!r}. Allowed: {allowed}.") from exc
+
+    def resolved_interpolation_factor(self) -> int:
+        factor = self.interpolation_factor
+        if factor is None:
+            factor = _model_config_value(self.model, "default_interpolation_factor", default=None)
+        if factor is None:
+            factor = 2
+        return validate_interpolation_factor(factor)
+
+    def resolved_interpolation_timesteps(self) -> tuple[float, ...]:
+        return resolve_interpolation_timesteps(
+            self.resolved_interpolation_mode(),
+            self.resolved_interpolation_factor(),
+        )
+
 
 @dataclass(frozen=True)
 class VideoInferenceResult:
@@ -81,6 +119,11 @@ class VideoInferenceResult:
     output_path: Path
     input_fps: float
     output_fps: float
+    interpolation_mode: str
+    interpolation_factor: int
+    interpolation_timesteps: tuple[float, ...]
+    runtime_backend: str
+    runtime_options: Mapping[str, object]
     pairs_processed: int
     frames_written: int
     model_inference_elapsed_sec: float
@@ -95,6 +138,13 @@ class VideoInferenceResult:
     audio_streams_available: int
     audio_streams_preserved: int
     mlflow_run_id: str | None
+
+
+@dataclass(frozen=True)
+class _FramePairVideoPrediction:
+    intermediate_frames: tuple[Any, ...]
+    timesteps: tuple[float, ...]
+    runtime_backend: str
 
 
 def run_ema_video_inference(
@@ -123,6 +173,10 @@ def run_video_inference(
     mlflow_mode: str = "video_inference",
 ) -> VideoInferenceResult:
     config.validate()
+    interpolation_mode = config.resolved_interpolation_mode()
+    interpolation_factor = config.resolved_interpolation_factor()
+    interpolation_timesteps = config.resolved_interpolation_timesteps()
+    runtime_options = dict(config.runtime_options)
     settings = settings or load_settings()
     input_path = _resolve_project_path(settings, config.input_path)
     output_path = _resolve_project_path(settings, config.output_path)
@@ -139,7 +193,7 @@ def run_video_inference(
     total_pairs = max(frame_count - 1, 0) if frame_count else None
     if config.limit_pairs is not None and total_pairs is not None:
         total_pairs = min(total_pairs, config.limit_pairs)
-    output_fps = fps * config.output_fps_multiplier
+    output_fps = fps * interpolation_factor
     output_rate = _fps_to_fraction(output_fps)
     encoder_options = resolve_encoder_options(
         config.codec,
@@ -157,6 +211,7 @@ def run_video_inference(
     pairs_processed = 0
     frames_written = 0
     model_inference_elapsed_sec = 0.0
+    runtime_backend = "adapter"
     audio_streams_available = 0
     audio_streams_preserved = 0
     total_start = perf_counter()
@@ -194,6 +249,10 @@ def run_video_inference(
             container=config.container or "inferred",
             codec=config.codec,
             output_fps=output_fps,
+            interpolation_mode=interpolation_mode.value,
+            interpolation_factor=interpolation_factor,
+            interpolation_timesteps=interpolation_timesteps,
+            runtime_options=runtime_options,
             width=width,
             height=height,
             pix_fmt=config.pix_fmt,
@@ -212,15 +271,24 @@ def run_video_inference(
             left = _bgr_to_tensor(previous_bgr)
             right = _bgr_to_tensor(current_bgr)
             inference_start = perf_counter()
-            prediction = model_adapter.predict_pair(left, right)
-            model_inference_elapsed_sec += perf_counter() - inference_start
-            _encode_video_frame(
-                output_container,
-                video_stream,
-                _tensor_to_writer_frame(prediction, config.frame_format),
-                config.frame_format,
-                config.codec,
+            prediction = _predict_video_pair(
+                model_adapter,
+                left,
+                right,
+                mode=interpolation_mode,
+                interpolation_factor=interpolation_factor,
+                runtime_options=runtime_options,
             )
+            model_inference_elapsed_sec += perf_counter() - inference_start
+            runtime_backend = prediction.runtime_backend
+            for intermediate_frame in prediction.intermediate_frames:
+                _encode_video_frame(
+                    output_container,
+                    video_stream,
+                    _tensor_to_writer_frame(intermediate_frame, config.frame_format),
+                    config.frame_format,
+                    config.codec,
+                )
             _encode_video_frame(
                 output_container,
                 video_stream,
@@ -228,10 +296,15 @@ def run_video_inference(
                 config.frame_format,
                 config.codec,
             )
-            frames_written += 2
+            frames_written += len(prediction.intermediate_frames) + 1
             pairs_processed += 1
             previous_bgr = current_bgr
-            _emit_progress(progress_callback, "pair_advanced")
+            _emit_progress(
+                progress_callback,
+                "pair_advanced",
+                generated_frames=len(prediction.intermediate_frames),
+                runtime_backend=runtime_backend,
+            )
         _flush_video_stream(output_container, video_stream, config.codec)
         audio_streams_preserved = _copy_audio_streams(
             input_audio_container,
@@ -265,7 +338,13 @@ def run_video_inference(
             "input_path": str(config.input_path),
             "output_path": str(config.output_path),
             "limit_pairs": config.limit_pairs,
-            "output_fps_multiplier": config.output_fps_multiplier,
+            "interpolation_mode": interpolation_mode.value,
+            "interpolation_factor": interpolation_factor,
+            "interpolation_timesteps": interpolation_timesteps,
+            "runtime_backend": runtime_backend,
+            "runtime_options": runtime_options,
+            "output_fps_multiplier": interpolation_factor,
+            "legacy_output_fps_multiplier_config": config.output_fps_multiplier,
             "output_fps": output_fps,
             "codec": config.codec,
             "container": config.container,
@@ -280,6 +359,7 @@ def run_video_inference(
             "inference.frames_written": float(frames_written),
             "inference.input_fps": fps,
             "inference.output_fps": output_fps,
+            "inference.interpolation_factor": float(interpolation_factor),
             "inference.audio_streams_available": float(audio_streams_available),
             "inference.audio_streams_preserved": float(audio_streams_preserved),
             "inference.model_elapsed_sec": model_inference_elapsed_sec,
@@ -296,6 +376,11 @@ def run_video_inference(
         output_path=output_path,
         input_fps=fps,
         output_fps=output_fps,
+        interpolation_mode=interpolation_mode.value,
+        interpolation_factor=interpolation_factor,
+        interpolation_timesteps=interpolation_timesteps,
+        runtime_backend=runtime_backend,
+        runtime_options=runtime_options,
         pairs_processed=pairs_processed,
         frames_written=frames_written,
         model_inference_elapsed_sec=model_inference_elapsed_sec,
@@ -338,6 +423,36 @@ def with_inference_limit(
     if limit_pairs is None:
         return config
     return replace(config, limit_pairs=limit_pairs)
+
+
+def with_inference_interpolation_mode(
+    config: VideoInferenceConfig,
+    interpolation_mode: str | InferenceMode | None,
+) -> VideoInferenceConfig:
+    if interpolation_mode is None:
+        return config
+    return replace(config, interpolation_mode=interpolation_mode)
+
+
+def with_inference_interpolation_factor(
+    config: VideoInferenceConfig,
+    interpolation_factor: int | None,
+) -> VideoInferenceConfig:
+    if interpolation_factor is None:
+        return config
+    return replace(config, interpolation_factor=interpolation_factor)
+
+
+def with_inference_runtime_option(
+    config: VideoInferenceConfig,
+    name: str,
+    value: object | None,
+) -> VideoInferenceConfig:
+    if value is None:
+        return config
+    runtime_options = dict(config.runtime_options)
+    runtime_options[name] = value
+    return replace(config, runtime_options=runtime_options)
 
 
 def with_inference_checkpoint(
@@ -565,16 +680,100 @@ def _tensor_to_writer_frame(tensor, frame_format: str) -> np.ndarray:
     raise ValueError(f"Unsupported frame_format: {frame_format}")
 
 
+def _predict_video_pair(
+    adapter: ModelAdapter,
+    left,
+    right,
+    *,
+    mode: InferenceMode,
+    interpolation_factor: int,
+    runtime_options: Mapping[str, object],
+) -> _FramePairVideoPrediction:
+    predict_frame_pair = getattr(adapter, "predict_frame_pair", None)
+    if callable(predict_frame_pair):
+        result = predict_frame_pair(
+            FramePairRequest(
+                left=left,
+                right=right,
+                mode=mode,
+                interpolation_factor=interpolation_factor,
+                backend_options=runtime_options,
+            )
+        )
+        if not isinstance(result, FramePairResult):
+            raise ValueError(
+                f"{adapter.__class__.__name__}.predict_frame_pair returned {type(result).__name__}, "
+                "expected FramePairResult."
+            )
+        return _FramePairVideoPrediction(
+            intermediate_frames=tuple(result.intermediate_frames),
+            timesteps=tuple(result.timesteps),
+            runtime_backend=result.backend_kind.value,
+        )
+
+    if mode is not InferenceMode.FIXED_2X or interpolation_factor != 2:
+        raise ValueError(
+            f"{adapter.__class__.__name__} only supports fixed_2x video inference through the legacy adapter API."
+        )
+    return _FramePairVideoPrediction(
+        intermediate_frames=(adapter.predict_pair(left, right),),
+        timesteps=(0.5,),
+        runtime_backend="adapter",
+    )
+
+
 def _resolve_project_path(settings: Settings, path: Path) -> Path:
     if path.is_absolute():
         return path
     return settings.resolve_path(path)
 
 
-def _model_config_value(model_config: Any, name: str) -> Any:
+def _model_config_value(model_config: Any, name: str, *, default: Any = "") -> Any:
     if isinstance(model_config, Mapping):
-        return model_config.get(name, "")
-    return getattr(model_config, name, "")
+        return model_config.get(name, default)
+    return getattr(model_config, name, default)
+
+
+def _validate_model_interpolation_support(
+    model_config: Any,
+    mode: InferenceMode,
+    interpolation_factor: int,
+) -> None:
+    supported_modes = _model_config_value(model_config, "supported_modes", default=None)
+    if supported_modes is not None:
+        supported = {str(supported_mode) for supported_mode in supported_modes}
+        if mode.value not in supported:
+            raise ValueError(
+                f"Model config does not support interpolation_mode={mode.value!r}. "
+                f"Supported modes: {', '.join(sorted(supported))}."
+            )
+    elif mode is InferenceMode.ARBITRARY_NX:
+        raise ValueError("arbitrary_nx video inference requires a model config that declares supported_modes.")
+
+    min_factor = _optional_model_config_int(model_config, "min_interpolation_factor")
+    max_factor = _optional_model_config_int(model_config, "max_interpolation_factor")
+    if min_factor is not None and interpolation_factor < min_factor:
+        raise ValueError(
+            f"interpolation_factor={interpolation_factor} is below this model config minimum {min_factor}."
+        )
+    if max_factor is not None and interpolation_factor > max_factor:
+        raise ValueError(
+            f"interpolation_factor={interpolation_factor} is above this model config maximum {max_factor}."
+        )
+
+
+def _validate_runtime_options(runtime_options: Mapping[str, object]) -> None:
+    if "scale" in runtime_options:
+        validate_rife_scale(runtime_options["scale"])
+
+
+def _optional_model_config_int(model_config: Any, name: str) -> int | None:
+    value = _model_config_value(model_config, name, default=None)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer when set.")
+    return value
 
 
 def _safe_rate(count: int, elapsed_sec: float) -> float:

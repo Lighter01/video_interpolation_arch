@@ -13,6 +13,11 @@ def conv(in_planes, out_planes, kernel_size=3, stride=1, padding=1, dilation=1):
     )
 
 
+def timestep_like(feature, timestep):
+    timestep_tensor = torch.as_tensor(timestep, device=feature.device, dtype=feature.dtype)
+    return torch.ones_like(feature) * timestep_tensor
+
+
 class Head(nn.Module):
     def __init__(self, in_planes, scale, c, in_else=17):
         super(Head, self).__init__()
@@ -72,7 +77,7 @@ class MultiScaleFlow(nn.Module):
         if (af is None) or (mf is None):
             af, mf = self.feature_bone(img0, img1)
         for i in range(self.flow_num_stage):
-            t = torch.full(mf[-1-i][:B].shape, timestep, dtype=torch.float).cuda()
+            t = timestep_like(mf[-1-i][:B], timestep)
             if flow != None:
                 warped_img0 = warp(img0, flow[:, :2])
                 warped_img1 = warp(img1, flow[:, 2:4])
@@ -118,9 +123,9 @@ class MultiScaleFlow(nn.Module):
         # appearence_features & motion_features
         af, mf = self.feature_bone(img0, img1)
         for i in range(self.flow_num_stage):
-            t = torch.full(mf[-1-i][:B].shape, timestep, dtype=torch.float).cuda()
+            t = timestep_like(mf[-1-i][:B], timestep)
             if flow != None:
-                flow_d, mask_d = self.block[i]( torch.cat([t*mf[-1-i][:B], (1-timestep)*mf[-1-i][B:],af[-1-i][:B],af[-1-i][B:]],1), 
+                flow_d, mask_d = self.block[i]( torch.cat([t*mf[-1-i][:B], (1-t)*mf[-1-i][B:],af[-1-i][:B],af[-1-i][B:]],1), 
                                                 torch.cat((img0, img1, warped_img0, warped_img1, mask), 1), flow)
                 flow = flow + flow_d
                 mask = mask + mask_d

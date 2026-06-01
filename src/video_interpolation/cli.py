@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from omegaconf import OmegaConf
+import torch
 import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
@@ -76,10 +77,42 @@ from .inference import (
     with_inference_codec,
     with_inference_config_path,
     with_inference_input,
+    with_inference_interpolation_factor,
+    with_inference_interpolation_mode,
     with_inference_limit,
     with_inference_mlflow_disabled,
     with_inference_output,
+    with_inference_runtime_option,
 )
+from .inference_runtime import (
+    EMAVFIOnnxRuntime,
+    EMAVFIOnnxRuntimeConfig,
+    FramePairRequest,
+    FramePairResult,
+    InferenceMode,
+    PracticalRIFEOnnxRuntime,
+    PracticalRIFEOnnxRuntimeConfig,
+)
+from .inference_runtime.onnx_export import (
+    DEFAULT_ONNX_EXPORT_ROOT,
+    DEFAULT_ONNX_OPSET_VERSION,
+    OnnxExportConfig,
+    OnnxExportResult,
+    OnnxShapeMode,
+    export_ema_runtime_onnx,
+    export_rife_runtime_onnx,
+)
+from .inference_runtime.onnx_validation import (
+    DEFAULT_EQUIVALENCE_ATOL,
+    DEFAULT_EQUIVALENCE_RTOL,
+    OnnxEquivalenceCheckResult,
+    OnnxValidationArtifacts,
+    resolve_preferred_onnx_artifact_path,
+    run_frame_pair_equivalence_check,
+    write_onnx_equivalence_report,
+)
+from .inference_runtime.backends.base import RuntimeBackendError
+from .inference_runtime.rife import validate_rife_scale
 from .mlflow import MlflowLoggingError, MlflowRunConfig, MlflowSmokeResult, run_mlflow_smoke
 from .rife_preflight import run_practical_rife_preflight
 from .settings import load_settings
@@ -123,19 +156,19 @@ console = Console()
 
 BATCH_TARGET_ALIASES: dict[str, tuple[str, ...]] = {
     "all": (
-        "practical_rife_v4_25",
-        "amt_s",
+        "practical_rife_v4_26",
         "ema_vfi_small",
         "baseline_duplicate_left",
         "baseline_blend",
         "baseline_farneback",
     ),
-    "models": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
-    "model": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
-    "neural": ("practical_rife_v4_25", "amt_s", "ema_vfi_small"),
+    "models": ("practical_rife_v4_26", "ema_vfi_small"),
+    "model": ("practical_rife_v4_26", "ema_vfi_small"),
+    "neural": ("practical_rife_v4_26", "ema_vfi_small"),
     "baselines": ("baseline_duplicate_left", "baseline_blend", "baseline_farneback"),
     "baseline": ("baseline_duplicate_left", "baseline_blend", "baseline_farneback"),
-    "rife": ("practical_rife_v4_25",),
+    "rife": ("practical_rife_v4_26",),
+    "rife_v4_25": ("practical_rife_v4_25",),
     "amt": ("amt_s",),
     "ema": ("ema_vfi_small",),
     "duplicate_left": ("baseline_duplicate_left",),
@@ -167,6 +200,10 @@ class _BatchInferenceRecord:
     frames_written: int | None = None
     input_fps: float | None = None
     output_fps: float | None = None
+    interpolation_mode: str | None = None
+    interpolation_factor: int | None = None
+    runtime_backend: str | None = None
+    runtime_options: dict[str, object] | None = None
     model_inference_elapsed_sec: float | None = None
     total_elapsed_sec: float | None = None
     model_pairs_per_sec: float | None = None
@@ -215,6 +252,23 @@ def infer_all_videos(
         min=1,
         help="Optional cap on neighboring frame pairs per video for smoke runs.",
     ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Video interpolation mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor. If omitted, the model config default is used.",
+    ),
+    rife_scale: float | None = typer.Option(
+        None,
+        "--rife-scale",
+        help="Request-time Practical-RIFE scale. Use 0.5 for high-resolution inputs such as 4K.",
+    ),
     codec: str | None = typer.Option(
         None,
         "--codec",
@@ -226,7 +280,7 @@ def infer_all_videos(
         "--method",
         help=(
             "Inference target or subgroup to run. Repeat for multiple values. "
-            "Examples: ema_vfi_small, amt_s, practical_rife_v4_25, blend, farneback, models, baselines."
+            "Examples: ema_vfi_small, practical_rife_v4_26, practical_rife_v4_25, amt_s, blend, models."
         ),
     ),
     disable_mlflow: bool = typer.Option(
@@ -255,7 +309,10 @@ def infer_all_videos(
         raise typer.Exit(code=1)
 
     try:
-        targets = _selected_inference_targets(_inference_targets(), target_selection)
+        effective_target_selection = target_selection
+        if effective_target_selection is None and mode == InferenceMode.ARBITRARY_NX.value:
+            effective_target_selection = ["models"]
+        targets = _selected_inference_targets(_inference_targets(), effective_target_selection)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -274,6 +331,9 @@ def infer_all_videos(
                 target_config = _load_batch_target_config(
                     target,
                     limit_pairs=limit_pairs,
+                    mode=mode,
+                    interpolation_factor=interpolation_factor,
+                    rife_scale=rife_scale,
                     codec=codec,
                     disable_mlflow=disable_mlflow,
                 )
@@ -319,6 +379,8 @@ def infer_all_videos(
                                 f"{payload['output_path']} "
                                 f"codec={payload['codec']} "
                                 f"fps={float(payload['output_fps']):.4f} "
+                                f"mode={payload['interpolation_mode']} "
+                                f"factor={payload['interpolation_factor']} "
                                 f"audio={payload['audio_streams_to_preserve']}/"
                                 f"{payload['audio_streams_available']}[/dim]"
                             )
@@ -345,6 +407,10 @@ def infer_all_videos(
                                 frames_written=result.frames_written,
                                 input_fps=result.input_fps,
                                 output_fps=result.output_fps,
+                                interpolation_mode=result.interpolation_mode,
+                                interpolation_factor=result.interpolation_factor,
+                                runtime_backend=result.runtime_backend,
+                                runtime_options=dict(result.runtime_options),
                                 model_inference_elapsed_sec=result.model_inference_elapsed_sec,
                                 total_elapsed_sec=result.total_elapsed_sec,
                                 model_pairs_per_sec=result.model_pairs_per_sec,
@@ -411,6 +477,57 @@ def _progress() -> Progress:
     )
 
 
+def _resolve_request_interpolation_factor(
+    interpolation_factor: int | None,
+    default_interpolation_factor: int,
+) -> int:
+    return default_interpolation_factor if interpolation_factor is None else interpolation_factor
+
+
+def _synthetic_frame_pair_request(
+    *,
+    mode: str,
+    interpolation_factor: int,
+    height: int,
+    width: int,
+) -> FramePairRequest:
+    left = torch.zeros(3, height, width)
+    right = torch.ones(3, height, width)
+    return FramePairRequest(
+        left=left,
+        right=right,
+        mode=mode,
+        interpolation_factor=interpolation_factor,
+    )
+
+
+def _resolve_onnx_cli_providers(provider: list[str] | None) -> tuple[str, ...]:
+    return tuple(provider or ["CPUExecutionProvider"])
+
+
+def _parse_onnx_validation_shapes(
+    shape_values: list[str] | None,
+    *,
+    default_shapes: tuple[str, ...],
+) -> tuple[tuple[int, int, int], ...]:
+    values = shape_values or list(default_shapes)
+    return tuple(_parse_onnx_validation_shape(value) for value in values)
+
+
+def _parse_onnx_validation_shape(value: str) -> tuple[int, int, int]:
+    parts = value.lower().replace(",", "x").split("x")
+    try:
+        dims = tuple(int(part) for part in parts if part)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid shape {value!r}; expected HxW or 3xHxW.") from exc
+    if len(dims) == 2:
+        height, width = dims
+        dims = (3, height, width)
+    if len(dims) != 3 or dims[0] != 3 or any(dim <= 0 for dim in dims):
+        raise typer.BadParameter(f"Invalid shape {value!r}; expected HxW or 3xHxW with positive dimensions.")
+    return dims
+
+
 @app.command("ema-preflight")
 def ema_preflight(
     fail_on_blocked: bool = typer.Option(
@@ -452,7 +569,7 @@ def amt_preflight(
 @app.command("rife-preflight")
 def rife_preflight(
     config: Path = typer.Option(
-        Path("configs/models/practical_rife_v4_25.yaml"),
+        Path("configs/models/practical_rife_v4_26.yaml"),
         "--config",
         help="YAML config with Practical-RIFE adapter parameters.",
     ),
@@ -494,6 +611,233 @@ def ema_adapter_check(
         raise typer.Exit(code=1)
 
 
+@ema_app.command("infer-pair")
+def ema_infer_pair(
+    config: Path = typer.Option(
+        Path("configs/models/ema_vfi_small.yaml"),
+        "--config",
+        help="YAML config with EMA-VFI-small adapter parameters.",
+    ),
+    mode: str = typer.Option(
+        InferenceMode.ARBITRARY_NX.value,
+        "--mode",
+        help="Frame-pair inference mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        help="Runtime interpolation factor. Required for explicit Nx smoke choices such as 4 or 8.",
+    ),
+    height: int = typer.Option(32, "--height", min=1, help="Synthetic input frame height."),
+    width: int = typer.Option(32, "--width", min=1, help="Synthetic input frame width."),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override EMA checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+) -> None:
+    """Run a tensor-pair EMA smoke inference through the Stage 2 request/result API."""
+    adapter = None
+    try:
+        adapter_config = EMAVFIAdapterConfig.from_mapping(_load_yaml_mapping(config))
+        factor = _resolve_request_interpolation_factor(interpolation_factor, adapter_config.default_interpolation_factor)
+        request = _synthetic_frame_pair_request(mode=mode, interpolation_factor=factor, height=height, width=width)
+        adapter = EMAVFIAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        result = adapter.predict_frame_pair(request)
+    except (ModelAdapterError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if adapter is not None:
+            adapter.close()
+
+    _print_frame_pair_result_summary("EMA-VFI-small pair inference", result)
+
+
+@ema_app.command("export-onnx")
+def ema_export_onnx(
+    config: Path = typer.Option(
+        Path("configs/models/ema_vfi_small.yaml"),
+        "--config",
+        help="YAML config with EMA-VFI-small adapter parameters.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override EMA checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    output_dir: Path = typer.Option(
+        DEFAULT_ONNX_EXPORT_ROOT,
+        "--output-dir",
+        help="Root directory for ONNX export artifacts.",
+    ),
+    device: str = typer.Option("cpu", "--device", help="Torch device used for export."),
+    opset_version: int = typer.Option(
+        DEFAULT_ONNX_OPSET_VERSION,
+        "--opset-version",
+        min=11,
+        help="ONNX opset version.",
+    ),
+    shape_mode: str = typer.Option(
+        OnnxShapeMode.DYNAMIC_HW.value,
+        "--shape-mode",
+        help="ONNX input shape policy: dynamic_hw or static.",
+    ),
+    batch_size: int = typer.Option(1, "--batch-size", min=1, help="Sample export batch size."),
+    height: int = typer.Option(32, "--height", min=1, help="Sample prepared/padded input height."),
+    width: int = typer.Option(32, "--width", min=1, help="Sample prepared/padded input width."),
+    timestep: float = typer.Option(0.5, "--timestep", min=0.0, max=1.0, help="Sample interpolation timestep."),
+    simplify: bool = typer.Option(
+        True,
+        "--simplify/--no-simplify",
+        help="Run onnx-simplifier after successful export.",
+    ),
+) -> None:
+    """Export the EMA-VFI neural core ONNX boundary without video or adapter orchestration."""
+    adapter = None
+    try:
+        adapter_config = replace(EMAVFIAdapterConfig.from_mapping(_load_yaml_mapping(config)), device=device)
+        export_config = OnnxExportConfig(
+            model_name=adapter_config.model_name,
+            output_dir=output_dir,
+            sample_input_shape=(batch_size, 3, height, width),
+            opset_version=opset_version,
+            shape_mode=shape_mode,
+            device=device,
+            timestep=timestep,
+            simplify=simplify,
+        )
+        adapter = EMAVFIAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        result = export_ema_runtime_onnx(adapter._require_runtime(), export_config)
+    except (ModelAdapterError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if adapter is not None:
+            adapter.close()
+
+    _print_onnx_export_result("EMA-VFI-small ONNX export", result)
+    if not result.success:
+        raise typer.Exit(code=1)
+
+
+@ema_app.command("validate-onnx")
+def ema_validate_onnx(
+    config: Path = typer.Option(
+        Path("configs/models/ema_vfi_small.yaml"),
+        "--config",
+        help="YAML config with EMA-VFI-small adapter parameters.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override EMA checkpoint path. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    onnx_path: Path | None = typer.Option(
+        None,
+        "--onnx-path",
+        help="Explicit ONNX artifact path. Omitted means model_exports/onnx default resolution.",
+    ),
+    artifact_root: Path = typer.Option(
+        DEFAULT_ONNX_EXPORT_ROOT,
+        "--artifact-root",
+        help="Root directory used when resolving the default ONNX artifact.",
+    ),
+    provider: list[str] | None = typer.Option(
+        None,
+        "--provider",
+        help="ONNX Runtime provider to request. Repeat to set priority; aliases cpu/cuda are accepted.",
+    ),
+    shape: list[str] | None = typer.Option(
+        None,
+        "--shape",
+        help="Synthetic CHW frame shape as HxW or 3xHxW. Repeat for dynamic-shape checks.",
+    ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Frame-pair inference mode for validation: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int = typer.Option(
+        2,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor used for validation.",
+    ),
+    torch_device: str = typer.Option("cpu", "--torch-device", help="Torch device used for PyTorch comparison."),
+    output_dir: Path = typer.Option(
+        Path("outputs/onnx_validation"),
+        "--output-dir",
+        help="Root directory for validation reports.",
+    ),
+    prefer_simplified: bool = typer.Option(
+        True,
+        "--prefer-simplified/--prefer-original",
+        help="Prefer the simplified artifact when resolving default ONNX paths.",
+    ),
+    atol: float = typer.Option(DEFAULT_EQUIVALENCE_ATOL, "--atol", help="Absolute tensor allclose tolerance."),
+    rtol: float = typer.Option(DEFAULT_EQUIVALENCE_RTOL, "--rtol", help="Relative tensor allclose tolerance."),
+) -> None:
+    """Compare EMA-VFI PyTorch and ONNX Runtime outputs on bounded synthetic frame pairs."""
+    adapter = None
+    onnx_runtime = None
+    try:
+        adapter_config = replace(EMAVFIAdapterConfig.from_mapping(_load_yaml_mapping(config)), device=torch_device)
+        artifact_path = resolve_preferred_onnx_artifact_path(
+            adapter_config.model_name,
+            artifact_root=artifact_root,
+            artifact_path=onnx_path,
+            prefer_simplified=prefer_simplified,
+        )
+        resolved_output_dir = output_dir.expanduser().resolve()
+        providers = _resolve_onnx_cli_providers(provider)
+        shapes = _parse_onnx_validation_shapes(shape, default_shapes=("32x32", "64x64"))
+
+        adapter = EMAVFIAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        if adapter._input_padder_cls is None:
+            raise ModelAdapterError("EMA-VFI input padder is not available after checkpoint loading.")
+        onnx_runtime = EMAVFIOnnxRuntime(
+            adapter._input_padder_cls,
+            EMAVFIOnnxRuntimeConfig(
+                model_name=adapter_config.model_name,
+                artifact_path=artifact_path,
+                providers=providers,
+                divisor=adapter_config.divisor,
+            ),
+        )
+        onnx_runtime.load()
+        result = run_frame_pair_equivalence_check(
+            model_name=adapter_config.model_name,
+            torch_predictor=adapter.predict_frame_pair,
+            onnx_predictor=onnx_runtime.predict,
+            artifact_path=artifact_path,
+            providers=providers,
+            input_shapes=shapes,
+            mode=mode,
+            interpolation_factor=interpolation_factor,
+            sample_output_root=resolved_output_dir / "sample_outputs",
+            atol=atol,
+            rtol=rtol,
+        )
+        artifacts = write_onnx_equivalence_report(result, resolved_output_dir)
+    except (ModelAdapterError, RuntimeBackendError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if onnx_runtime is not None:
+            onnx_runtime.close()
+        if adapter is not None:
+            adapter.close()
+
+    _print_onnx_equivalence_result("EMA-VFI-small ONNX Runtime validation", result, artifacts)
+    if not result.success:
+        raise typer.Exit(code=1)
+
+
 @ema_app.command("infer-video")
 def ema_infer_video(
     config: Path = typer.Option(
@@ -517,6 +861,18 @@ def ema_infer_video(
         min=1,
         help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
     ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Video interpolation mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor. If omitted, the model config default is used.",
+    ),
     checkpoint_path: Path | None = typer.Option(
         None,
         "--checkpoint",
@@ -533,16 +889,22 @@ def ema_infer_video(
         help="Skip MLflow logging for a tiny local smoke run.",
     ),
 ) -> None:
-    """Run local 2x video inference with EMA-VFI-small."""
+    """Run local fixed 2x or arbitrary Nx video inference with EMA-VFI-small."""
     inference_config = VideoInferenceConfig.from_mapping(_load_yaml_mapping(config))
     inference_config = with_inference_config_path(inference_config, config)
     inference_config = with_inference_input(inference_config, input_path)
     inference_config = with_inference_output(inference_config, output_path)
     inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_interpolation_mode(inference_config, mode)
+    inference_config = with_inference_interpolation_factor(inference_config, interpolation_factor)
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
-    console.print(f"[bold]Running EMA-VFI-small video inference:[/bold] {inference_config.input_path}")
+    console.print(
+        "[bold]Running EMA-VFI-small video inference:[/bold] "
+        f"{inference_config.input_path} mode={inference_config.interpolation_mode} "
+        f"factor={inference_config.interpolation_factor or 'config-default'}"
+    )
 
     with _progress() as progress:
         pairs_task = progress.add_task("Frame pairs", total=None)
@@ -756,6 +1118,18 @@ def amt_infer_video(
         min=1,
         help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
     ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Video interpolation mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor. If omitted, the model config default is used.",
+    ),
     checkpoint_path: Path | None = typer.Option(
         None,
         "--checkpoint",
@@ -892,7 +1266,7 @@ def amt_validate_candidate(
 @rife_app.command("adapter-check")
 def rife_adapter_check(
     config: Path = typer.Option(
-        Path("configs/models/practical_rife_v4_25.yaml"),
+        Path("configs/models/practical_rife_v4_26.yaml"),
         "--config",
         help="YAML config with Practical-RIFE adapter parameters.",
     ),
@@ -912,10 +1286,267 @@ def rife_adapter_check(
         raise typer.Exit(code=1)
 
 
+@rife_app.command("infer-pair")
+def rife_infer_pair(
+    config: Path = typer.Option(
+        Path("configs/models/practical_rife_v4_26.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE adapter parameters.",
+    ),
+    mode: str = typer.Option(
+        InferenceMode.ARBITRARY_NX.value,
+        "--mode",
+        help="Frame-pair inference mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        help="Runtime interpolation factor. Required for explicit Nx smoke choices such as 4 or 8.",
+    ),
+    scale: float | None = typer.Option(
+        None,
+        "--scale",
+        help="Request-time Practical-RIFE scale. Use 0.5 for high-resolution inputs such as 4K.",
+    ),
+    height: int = typer.Option(32, "--height", min=1, help="Synthetic input frame height."),
+    width: int = typer.Option(32, "--width", min=1, help="Synthetic input frame width."),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override Practical-RIFE checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+) -> None:
+    """Run a tensor-pair Practical-RIFE smoke inference through the Stage 2 request/result API."""
+    adapter = None
+    try:
+        adapter_config = PracticalRIFEAdapterConfig.from_mapping(_load_yaml_mapping(config))
+        factor = _resolve_request_interpolation_factor(interpolation_factor, adapter_config.default_interpolation_factor)
+        backend_options = {}
+        if scale is not None:
+            backend_options["scale"] = validate_rife_scale(scale)
+        request = _synthetic_frame_pair_request(mode=mode, interpolation_factor=factor, height=height, width=width)
+        if backend_options:
+            request = FramePairRequest(
+                left=request.left,
+                right=request.right,
+                mode=request.mode,
+                interpolation_factor=request.interpolation_factor,
+                timesteps=request.timesteps,
+                backend_options=backend_options,
+            )
+        adapter = PracticalRIFEAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        result = adapter.predict_frame_pair(request)
+    except (ModelAdapterError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if adapter is not None:
+            adapter.close()
+
+    _print_frame_pair_result_summary("Practical-RIFE pair inference", result)
+
+
+@rife_app.command("export-onnx")
+def rife_export_onnx(
+    config: Path = typer.Option(
+        Path("configs/models/practical_rife_v4_26.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE adapter parameters.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override Practical-RIFE checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    output_dir: Path = typer.Option(
+        DEFAULT_ONNX_EXPORT_ROOT,
+        "--output-dir",
+        help="Root directory for ONNX export artifacts.",
+    ),
+    device: str = typer.Option("cpu", "--device", help="Torch device used for export."),
+    opset_version: int = typer.Option(
+        DEFAULT_ONNX_OPSET_VERSION,
+        "--opset-version",
+        min=11,
+        help="ONNX opset version.",
+    ),
+    shape_mode: str = typer.Option(
+        OnnxShapeMode.DYNAMIC_HW.value,
+        "--shape-mode",
+        help="ONNX input shape policy: dynamic_hw or static.",
+    ),
+    batch_size: int = typer.Option(1, "--batch-size", min=1, help="Sample export batch size."),
+    height: int = typer.Option(128, "--height", min=1, help="Sample prepared/padded input height."),
+    width: int = typer.Option(128, "--width", min=1, help="Sample prepared/padded input width."),
+    timestep: float = typer.Option(0.5, "--timestep", min=0.0, max=1.0, help="Sample interpolation timestep."),
+    scale: float | None = typer.Option(
+        None,
+        "--scale",
+        help="Practical-RIFE export scale. Omitted means the model config default.",
+    ),
+    simplify: bool = typer.Option(
+        True,
+        "--simplify/--no-simplify",
+        help="Run onnx-simplifier after successful export.",
+    ),
+) -> None:
+    """Export the Practical-RIFE neural core ONNX boundary without video orchestration."""
+    adapter = None
+    try:
+        resolved_scale = None if scale is None else validate_rife_scale(scale)
+        adapter_config = replace(PracticalRIFEAdapterConfig.from_mapping(_load_yaml_mapping(config)), device=device)
+        export_config = OnnxExportConfig(
+            model_name=adapter_config.model_name,
+            output_dir=output_dir,
+            sample_input_shape=(batch_size, 3, height, width),
+            opset_version=opset_version,
+            shape_mode=shape_mode,
+            device=device,
+            timestep=timestep,
+            simplify=simplify,
+        )
+        adapter = PracticalRIFEAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        result = export_rife_runtime_onnx(adapter._require_runtime(), export_config, scale=resolved_scale)
+    except (ModelAdapterError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if adapter is not None:
+            adapter.close()
+
+    _print_onnx_export_result("Practical-RIFE ONNX export", result)
+    if not result.success:
+        raise typer.Exit(code=1)
+
+
+@rife_app.command("validate-onnx")
+def rife_validate_onnx(
+    config: Path = typer.Option(
+        Path("configs/models/practical_rife_v4_26.yaml"),
+        "--config",
+        help="YAML config with Practical-RIFE adapter parameters.",
+    ),
+    checkpoint_path: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Override Practical-RIFE checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+    ),
+    onnx_path: Path | None = typer.Option(
+        None,
+        "--onnx-path",
+        help="Explicit ONNX artifact path. Omitted means model_exports/onnx default resolution.",
+    ),
+    artifact_root: Path = typer.Option(
+        DEFAULT_ONNX_EXPORT_ROOT,
+        "--artifact-root",
+        help="Root directory used when resolving the default ONNX artifact.",
+    ),
+    provider: list[str] | None = typer.Option(
+        None,
+        "--provider",
+        help="ONNX Runtime provider to request. Repeat to set priority; aliases cpu/cuda are accepted.",
+    ),
+    shape: list[str] | None = typer.Option(
+        None,
+        "--shape",
+        help="Synthetic CHW frame shape as HxW or 3xHxW. Repeat for dynamic-shape checks.",
+    ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Frame-pair inference mode for validation: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int = typer.Option(
+        2,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor used for validation.",
+    ),
+    scale: float | None = typer.Option(
+        None,
+        "--scale",
+        help="Practical-RIFE scale baked into the selected ONNX artifact. Omitted means model config default.",
+    ),
+    torch_device: str = typer.Option("cpu", "--torch-device", help="Torch device used for PyTorch comparison."),
+    output_dir: Path = typer.Option(
+        Path("outputs/onnx_validation"),
+        "--output-dir",
+        help="Root directory for validation reports.",
+    ),
+    prefer_simplified: bool = typer.Option(
+        True,
+        "--prefer-simplified/--prefer-original",
+        help="Prefer the simplified artifact when resolving default ONNX paths.",
+    ),
+    atol: float = typer.Option(DEFAULT_EQUIVALENCE_ATOL, "--atol", help="Absolute tensor allclose tolerance."),
+    rtol: float = typer.Option(DEFAULT_EQUIVALENCE_RTOL, "--rtol", help="Relative tensor allclose tolerance."),
+) -> None:
+    """Compare Practical-RIFE PyTorch and ONNX Runtime outputs on bounded synthetic frame pairs."""
+    adapter = None
+    onnx_runtime = None
+    try:
+        resolved_scale = None if scale is None else validate_rife_scale(scale)
+        adapter_config = replace(PracticalRIFEAdapterConfig.from_mapping(_load_yaml_mapping(config)), device=torch_device)
+        artifact_path = resolve_preferred_onnx_artifact_path(
+            adapter_config.model_name,
+            artifact_root=artifact_root,
+            artifact_path=onnx_path,
+            prefer_simplified=prefer_simplified,
+        )
+        resolved_output_dir = output_dir.expanduser().resolve()
+        providers = _resolve_onnx_cli_providers(provider)
+        shapes = _parse_onnx_validation_shapes(shape, default_shapes=("128x128", "128x256"))
+        effective_scale = adapter_config.scale if resolved_scale is None else resolved_scale
+        backend_options = {"scale": effective_scale}
+
+        adapter = PracticalRIFEAdapter(adapter_config)
+        adapter.load_checkpoint(checkpoint_path)
+        onnx_runtime = PracticalRIFEOnnxRuntime(
+            PracticalRIFEOnnxRuntimeConfig(
+                model_name=adapter_config.model_name,
+                artifact_path=artifact_path,
+                providers=providers,
+                scale=effective_scale,
+                divisor=adapter_config.divisor,
+            )
+        )
+        onnx_runtime.load()
+        result = run_frame_pair_equivalence_check(
+            model_name=adapter_config.model_name,
+            torch_predictor=adapter.predict_frame_pair,
+            onnx_predictor=onnx_runtime.predict,
+            artifact_path=artifact_path,
+            providers=providers,
+            input_shapes=shapes,
+            mode=mode,
+            interpolation_factor=interpolation_factor,
+            backend_options=backend_options,
+            sample_output_root=resolved_output_dir / "sample_outputs",
+            atol=atol,
+            rtol=rtol,
+        )
+        artifacts = write_onnx_equivalence_report(result, resolved_output_dir)
+    except (ModelAdapterError, RuntimeBackendError, FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        if onnx_runtime is not None:
+            onnx_runtime.close()
+        if adapter is not None:
+            adapter.close()
+
+    _print_onnx_equivalence_result("Practical-RIFE ONNX Runtime validation", result, artifacts)
+    if not result.success:
+        raise typer.Exit(code=1)
+
+
 @rife_app.command("infer-video")
 def rife_infer_video(
     config: Path = typer.Option(
-        Path("configs/inference/practical_rife_v4_25_2x.yaml"),
+        Path("configs/inference/practical_rife_v4_26_2x.yaml"),
         "--config",
         help="YAML config with Practical-RIFE local video inference parameters.",
     ),
@@ -935,10 +1566,27 @@ def rife_infer_video(
         min=1,
         help="Optional cap on interpolated neighboring frame pairs for smoke runs.",
     ),
+    mode: str = typer.Option(
+        InferenceMode.FIXED_2X.value,
+        "--mode",
+        help="Video interpolation mode: fixed_2x or arbitrary_nx.",
+    ),
+    interpolation_factor: int | None = typer.Option(
+        None,
+        "--interpolation-factor",
+        min=2,
+        max=8,
+        help="Runtime interpolation factor. If omitted, the model config default is used.",
+    ),
+    scale: float | None = typer.Option(
+        None,
+        "--scale",
+        help="Request-time Practical-RIFE scale. Use 0.5 for high-resolution inputs such as 4K.",
+    ),
     checkpoint_path: Path | None = typer.Option(
         None,
         "--checkpoint",
-        help="Override Practical-RIFE train_log checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+        help="Override Practical-RIFE checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
     ),
     codec: str | None = typer.Option(
         None,
@@ -951,7 +1599,13 @@ def rife_infer_video(
         help="Skip MLflow logging for a tiny local smoke run.",
     ),
 ) -> None:
-    """Run local 2x video inference with Practical-RIFE."""
+    """Run local fixed 2x or arbitrary Nx video inference with Practical-RIFE."""
+    try:
+        runtime_scale = None if scale is None else validate_rife_scale(scale)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
     inference_config = VideoInferenceConfig.from_mapping(
         _load_yaml_mapping(config),
         model_config_factory=PracticalRIFEAdapterConfig.from_mapping,
@@ -960,10 +1614,22 @@ def rife_infer_video(
     inference_config = with_inference_input(inference_config, input_path)
     inference_config = with_inference_output(inference_config, output_path)
     inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_interpolation_mode(inference_config, mode)
+    inference_config = with_inference_interpolation_factor(inference_config, interpolation_factor)
+    inference_config = with_inference_runtime_option(
+        inference_config,
+        "scale",
+        runtime_scale,
+    )
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
-    console.print(f"[bold]Running Practical-RIFE video inference:[/bold] {inference_config.input_path}")
+    console.print(
+        "[bold]Running Practical-RIFE video inference:[/bold] "
+        f"{inference_config.input_path} mode={inference_config.interpolation_mode} "
+        f"factor={inference_config.interpolation_factor or 'config-default'} "
+        f"scale={inference_config.runtime_options.get('scale', 'config-default')}"
+    )
 
     with _progress() as progress:
         pairs_task = progress.add_task("Frame pairs", total=None)
@@ -994,7 +1660,7 @@ def rife_infer_video(
 @rife_app.command("validate-candidate")
 def rife_validate_candidate(
     config: Path = typer.Option(
-        Path("configs/validation/practical_rife_v4_25_candidate.yaml"),
+        Path("configs/validation/practical_rife_v4_26_candidate.yaml"),
         "--config",
         help="YAML config with Practical-RIFE candidate validation parameters.",
     ),
@@ -1017,7 +1683,7 @@ def rife_validate_candidate(
     checkpoint_path: Path | None = typer.Option(
         None,
         "--checkpoint",
-        help="Override candidate train_log checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
+        help="Override candidate checkpoint directory. Relative paths resolve under MODEL_WEIGHTS_ROOT.",
     ),
     no_lpips: bool = typer.Option(
         False,
@@ -1548,6 +2214,15 @@ def _inference_targets() -> list[_InferenceTarget]:
     # Practical-RIFE goes before EMA because both upstream repos use a top-level `model` package name.
     return [
         _InferenceTarget(
+            name="practical_rife_v4_26",
+            label="Practical-RIFE v4.26",
+            config_path=Path("configs/inference/practical_rife_v4_26_2x.yaml"),
+            output_group=Path("practical_rife_v4_26"),
+            model_config_factory=PracticalRIFEAdapterConfig.from_mapping,
+            adapter_factory=lambda model_config, settings: PracticalRIFEAdapter(model_config, settings=settings),
+            mlflow_mode="practical_rife_video_inference",
+        ),
+        _InferenceTarget(
             name="practical_rife_v4_25",
             label="Practical-RIFE v4.25",
             config_path=Path("configs/inference/practical_rife_v4_25_2x.yaml"),
@@ -1596,7 +2271,7 @@ def _selected_inference_targets(
 ) -> list[_InferenceTarget]:
     selected_names = resolve_batch_target_names(
         [target.name for target in targets],
-        target_selection,
+        target_selection or ["all"],
         aliases=BATCH_TARGET_ALIASES,
     )
     by_name = {target.name: target for target in targets}
@@ -1607,6 +2282,9 @@ def _load_batch_target_config(
     target: _InferenceTarget,
     *,
     limit_pairs: int | None,
+    mode: str,
+    interpolation_factor: int | None,
+    rife_scale: float | None,
     codec: str | None,
     disable_mlflow: bool,
 ) -> VideoInferenceConfig:
@@ -1616,6 +2294,14 @@ def _load_batch_target_config(
     )
     inference_config = with_inference_config_path(inference_config, target.config_path)
     inference_config = with_inference_limit(inference_config, limit_pairs)
+    inference_config = with_inference_interpolation_mode(inference_config, mode)
+    inference_config = with_inference_interpolation_factor(inference_config, interpolation_factor)
+    if target.name.startswith("practical_rife"):
+        inference_config = with_inference_runtime_option(
+            inference_config,
+            "scale",
+            None if rife_scale is None else validate_rife_scale(rife_scale),
+        )
     inference_config = with_inference_codec(inference_config, codec)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     if target.baseline_name is not None:
@@ -1623,6 +2309,7 @@ def _load_batch_target_config(
             inference_config,
             model=with_baseline_adapter_name(inference_config.model, target.baseline_name),
         )
+    inference_config.validate()
     return inference_config
 
 
@@ -1638,6 +2325,7 @@ def _batch_video_config(
         output_group=target.output_group,
         relative_input_path=video.relative_path,
         output_extension=output_extension,
+        interpolation_factor=target_config.resolved_interpolation_factor(),
     )
     return replace(
         target_config,
@@ -1645,7 +2333,11 @@ def _batch_video_config(
         output_path=output_path,
         mlflow=replace(
             target_config.mlflow,
-            run_name=batch_run_name(target_name=target.name, relative_input_path=video.relative_path),
+            run_name=batch_run_name(
+                target_name=target.name,
+                relative_input_path=video.relative_path,
+                interpolation_factor=target_config.resolved_interpolation_factor(),
+            ),
         ),
     )
 
@@ -1677,6 +2369,10 @@ def _batch_measurement_row(record: _BatchInferenceRecord) -> dict[str, object]:
         "frames_written": record.frames_written,
         "input_fps": _optional_float(record.input_fps),
         "output_fps": _optional_float(record.output_fps),
+        "interpolation_mode": record.interpolation_mode,
+        "interpolation_factor": record.interpolation_factor,
+        "runtime_backend": record.runtime_backend,
+        "runtime_options": record.runtime_options,
         "model_inference_elapsed_sec": _optional_float(record.model_inference_elapsed_sec),
         "total_elapsed_sec": _optional_float(record.total_elapsed_sec),
         "model_pairs_per_sec": _optional_float(record.model_pairs_per_sec),
@@ -1828,6 +2524,8 @@ def _print_batch_inference_summary(records: list[_BatchInferenceRecord], measure
     detail.add_column("input")
     detail.add_column("status")
     detail.add_column("output")
+    detail.add_column("mode")
+    detail.add_column("factor")
     detail.add_column("pairs")
     detail.add_column("elapsed")
     detail.add_column("mlflow")
@@ -1838,6 +2536,8 @@ def _print_batch_inference_summary(records: list[_BatchInferenceRecord], measure
             str(record.input_video),
             record.status,
             "" if record.output_video is None else str(record.output_video),
+            record.interpolation_mode or "",
+            "" if record.interpolation_factor is None else str(record.interpolation_factor),
             "" if record.pairs_processed is None else str(record.pairs_processed),
             "" if record.total_elapsed_sec is None else f"{record.total_elapsed_sec:.3f}s",
             record.mlflow_run_id or "",
@@ -1863,6 +2563,96 @@ def _print_adapter_environment_report(title: str, report: AdapterEnvironmentRepo
     console.print(table)
 
 
+def _print_frame_pair_result_summary(title: str, result: FramePairResult) -> None:
+    table = Table(title=title)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("model", result.model_name or "unknown")
+    table.add_row("backend", result.backend_kind.value)
+    table.add_row("mode", result.mode.value)
+    table.add_row("interpolation factor", str(result.interpolation_factor))
+    table.add_row("intermediate frames", str(len(result.intermediate_frames)))
+    table.add_row("timesteps", ", ".join(f"{timestep:.6g}" for timestep in result.timesteps))
+    table.add_row("original shape", str(result.original_shape))
+    table.add_row("padded shape", str(result.padded_shape))
+    table.add_row("elapsed", "n/a" if result.elapsed_sec is None else f"{result.elapsed_sec:.3f}s")
+    console.print(table)
+
+
+def _print_onnx_export_result(title: str, result: OnnxExportResult) -> None:
+    table = Table(title=f"{title}: {'ok' if result.success else 'failed'}")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("model", result.model_name)
+    table.add_row("shape mode", result.shape_mode.value)
+    table.add_row("sample shape", "x".join(str(value) for value in result.sample_input_shape))
+    table.add_row("opset", str(result.opset_version))
+    table.add_row("original", str(result.original_path))
+    table.add_row("checker", result.checker_status)
+    table.add_row("simplification", result.simplification_status)
+    table.add_row("simplified", str(result.simplified_path))
+    table.add_row("preferred", str(result.preferred_path) if result.preferred_path is not None else "")
+    if result.error:
+        table.add_row("error", result.error)
+    if result.checker_error:
+        table.add_row("checker error", result.checker_error)
+    if result.simplification_error:
+        table.add_row("simplification error", result.simplification_error)
+    console.print(table)
+
+
+def _print_onnx_equivalence_result(
+    title: str,
+    result: OnnxEquivalenceCheckResult,
+    artifacts: OnnxValidationArtifacts,
+) -> None:
+    table = Table(title=f"{title}: {'ok' if result.success else 'failed'}")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("model", result.model_name)
+    table.add_row("artifact", str(result.artifact_path))
+    table.add_row("providers requested", ", ".join(result.providers))
+    session_providers = sorted(
+        {
+            provider
+            for record in result.records
+            for provider in record.session_providers
+        }
+    )
+    table.add_row("providers used", ", ".join(session_providers) if session_providers else "n/a")
+    table.add_row("mode", result.mode.value)
+    table.add_row("interpolation factor", str(result.interpolation_factor))
+    table.add_row("shapes", ", ".join("x".join(str(value) for value in shape) for shape in result.input_shapes))
+    table.add_row("atol/rtol", f"{result.atol:g} / {result.rtol:g}")
+    table.add_row("mean MAE", "n/a" if result.mae is None else f"{result.mae:.8g}")
+    table.add_row(
+        "max abs error",
+        "n/a" if result.max_abs_error is None else f"{result.max_abs_error:.8g}",
+    )
+    table.add_row("report", str(artifacts.report_path))
+    table.add_row("metrics csv", str(artifacts.metrics_csv_path))
+    console.print(table)
+
+    failed_records = [record for record in result.records if not record.ok]
+    if failed_records:
+        detail = Table(title="Failed ONNX Equivalence Records")
+        detail.add_column("shape")
+        detail.add_column("timestep")
+        detail.add_column("mae")
+        detail.add_column("max abs")
+        detail.add_column("error")
+        for record in failed_records:
+            metrics = record.metrics
+            detail.add_row(
+                "x".join(str(value) for value in record.input_shape),
+                "" if record.timestep is None else f"{record.timestep:.6g}",
+                "" if metrics is None else f"{metrics.mae:.8g}",
+                "" if metrics is None else f"{metrics.max_abs_error:.8g}",
+                (record.error or "allclose=False")[:160],
+            )
+        console.print(detail)
+
+
 def _print_video_inference_summary(result: VideoInferenceResult) -> None:
     table = Table(title="Video Inference Summary")
     table.add_column("Field")
@@ -1871,6 +2661,11 @@ def _print_video_inference_summary(result: VideoInferenceResult) -> None:
     table.add_row("output video", str(result.output_path))
     table.add_row("input fps", f"{result.input_fps:.4f}")
     table.add_row("output fps", f"{result.output_fps:.4f}")
+    table.add_row("mode", result.interpolation_mode)
+    table.add_row("interpolation factor", str(result.interpolation_factor))
+    table.add_row("timesteps", ", ".join(f"{timestep:.6g}" for timestep in result.interpolation_timesteps))
+    table.add_row("runtime backend", result.runtime_backend)
+    table.add_row("runtime options", str(dict(result.runtime_options)))
     table.add_row("codec", result.codec)
     table.add_row("container", result.container or "inferred")
     table.add_row("pixel format", result.pix_fmt)
@@ -1894,6 +2689,10 @@ def _print_inference_encoding_settings(payload: dict[str, object]) -> None:
     table.add_row("container", str(payload["container"]))
     table.add_row("codec", str(payload["codec"]))
     table.add_row("output fps", f"{float(payload['output_fps']):.4f}")
+    table.add_row("mode", str(payload["interpolation_mode"]))
+    table.add_row("interpolation factor", str(payload["interpolation_factor"]))
+    table.add_row("timesteps", ", ".join(f"{float(timestep):.6g}" for timestep in payload["interpolation_timesteps"]))
+    table.add_row("runtime options", str(payload.get("runtime_options", {})))
     table.add_row("frame size", f"{payload['width']}x{payload['height']}")
     table.add_row("pixel format", str(payload["pix_fmt"]))
     table.add_row("frame format", str(payload["frame_format"]))

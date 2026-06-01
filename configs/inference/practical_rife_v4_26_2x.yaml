@@ -1,9 +1,9 @@
 input_path: raw_data/tmp_test/Dora.mp4
-output_path: outputs/inference/practical_rife_v4_25/dora_2x.mp4
+output_path: outputs/inference/practical_rife_v4_26/dora_2x.mp4
 model:
-  model_name: practical_rife_v4_25
+  model_name: practical_rife_v4_26
   repo_name: Practical-RIFE
-  checkpoint_path: Practical-RIFE/RIFEv4.25/train_log
+  checkpoint_path: Practical-RIFE/RIFEv4.26/train_log
   supported_modes:
     - fixed_2x
     - arbitrary_nx
@@ -61,7 +61,7 @@ encoder_options: {}
 mlflow:
   enabled: true
   experiment_name: stage1-rife-inference
-  run_name: practical_rife_v4_25_2x
+  run_name: practical_rife_v4_26_2x
   tags:
     stage: stage1
     workflow: practical_rife_video_inference

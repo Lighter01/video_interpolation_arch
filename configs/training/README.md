@@ -13,7 +13,7 @@ Fields:
 | `train_manifest_path` | path string | default `dataset_versions/stage1_default/train_all.csv` | Training samples. Do not point this at `test_all.csv` | Yes |
 | `val_manifest_path` | path string | default `dataset_versions/stage1_default/val_all.csv` | Validation samples used during training | Yes |
 | `output_dir` | path string | default `outputs/training/ema_vfi_small/stage1_default` | Receives `best_checkpoint.pkl` and `last_checkpoint.pkl` | Rerun to write elsewhere |
-| `model` | mapping | same fields as `configs/models/ema_vfi_small.yaml` | Starting checkpoint and adapter settings | Yes |
+| `model` | mapping | same adapter fields as `configs/models/ema_vfi_small.yaml`; training keeps `checkpoint_path: EMA-VFI/ours_small.pkl` | Starting checkpoint and adapter settings | Yes |
 | `mode` | string | `finetune` or `eval_only`; `scratch_train` is rejected for now | Controls runner behavior | Yes |
 | `seed` | integer | default `42` | Seeds Python, NumPy, and Torch RNGs | Yes |
 | `batch_size` | integer | default `1` | Batch size for train/validation loaders | Yes |
@@ -44,6 +44,7 @@ Side effects and outputs:
 - Uses only `train_manifest_path` and `val_manifest_path`.
 - Saves `best_checkpoint.pkl` and `last_checkpoint.pkl` under `output_dir` during fine-tuning.
 - Does not use `test_all.csv`; candidate validation handles test manifests separately.
+- Does not use arbitrary/Nx inference settings. EMA training and fine-tuning remain fixed 2x.
 - Requires CUDA for the current EMA adapter.
 
 Inspect:

@@ -15,6 +15,10 @@ MEASUREMENT_COLUMNS = (
     "frames_written",
     "input_fps",
     "output_fps",
+    "interpolation_mode",
+    "interpolation_factor",
+    "runtime_backend",
+    "runtime_options",
     "model_inference_elapsed_sec",
     "total_elapsed_sec",
     "model_pairs_per_sec",
@@ -59,14 +63,20 @@ def batch_output_path(
     output_group: Path,
     relative_input_path: Path,
     output_extension: str,
+    interpolation_factor: int = 2,
 ) -> Path:
     extension = output_extension if output_extension.startswith(".") else f".{output_extension}"
-    return output_root / output_group / relative_input_path.parent / f"{relative_input_path.stem}_2x{extension}"
+    return (
+        output_root
+        / output_group
+        / relative_input_path.parent
+        / f"{relative_input_path.stem}_{interpolation_factor}x{extension}"
+    )
 
 
-def batch_run_name(*, target_name: str, relative_input_path: Path) -> str:
+def batch_run_name(*, target_name: str, relative_input_path: Path, interpolation_factor: int = 2) -> str:
     relative_stem = "_".join(relative_input_path.with_suffix("").parts)
-    return f"{target_name}_{relative_stem}_2x"
+    return f"{target_name}_{relative_stem}_{interpolation_factor}x"
 
 
 def resolve_batch_target_names(

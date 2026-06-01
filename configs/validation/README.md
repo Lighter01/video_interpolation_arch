@@ -14,7 +14,7 @@ Fields:
 | `dataset_version_id` | string | example `stage1_default` | Provenance in the report and MLflow params | Yes |
 | `test_manifest_path` | path string | default `dataset_versions/stage1_default/test_all.csv` | Test-only manifest for candidate validation | Yes |
 | `output_dir` | path string | default `outputs/candidate_validation/ema_vfi_small/stage1_default` | Receives metrics, report, and sample predictions | Rerun to write elsewhere |
-| `model` | mapping | same fields as `configs/models/ema_vfi_small.yaml` | Candidate checkpoint and adapter settings | Yes |
+| `model` | mapping | same adapter fields as `configs/models/ema_vfi_small.yaml` | Candidate checkpoint and adapter settings; validation remains fixed 2x unless explicitly changed | Yes |
 | `thresholds.min_psnr_mean` | float or `null` | example `25.0` | Rejects candidate when global PSNR mean is below this value | Yes |
 | `thresholds.min_ssim_mean` | float or `null` | example `0.80` | Rejects candidate when global SSIM mean is below this value | Yes |
 | `thresholds.max_lpips_mean` | float or `null` | default `null` | Rejects candidate when global LPIPS mean is above this value | Yes |
@@ -108,19 +108,19 @@ Common failures:
 - The manifest is not `test_all.csv` or contains missing frame paths.
 - MLflow logging is enabled but the tracking server is not running.
 
-## `practical_rife_v4_25_candidate.yaml`
+## `practical_rife_v4_26_candidate.yaml`
 
-Purpose: evaluate Practical-RIFE v4.25 on `test_all.csv`, write metrics and visual prediction sets, and produce an approval/rejection report. This also serves as the Practical-RIFE eval-only smoke workflow for Milestone 9.
+Purpose: evaluate Practical-RIFE v4.26 on `test_all.csv`, write metrics and visual prediction sets, and produce an approval/rejection report. This is the Stage 2 default Practical-RIFE candidate validation config.
 
 Practical-RIFE-specific fields:
 
 | Field | Type | Allowed/default | Effect | Rerun needed |
 | --- | --- | --- | --- | --- |
-| `candidate_id` | string | example `practical_rife_v4_25_candidate` | Used in metrics, report, and prediction folder names | Yes |
+| `candidate_id` | string | example `practical_rife_v4_26_candidate` | Used in metrics, report, and prediction folder names | Yes |
 | `dataset_version_id` | string | example `stage1_default` | Provenance in the report and MLflow params | Yes |
 | `test_manifest_path` | path string | default `dataset_versions/stage1_default/test_all.csv` | Test-only manifest for Practical-RIFE validation | Yes |
-| `output_dir` | path string | default `outputs/candidate_validation/practical_rife_v4_25/stage1_default` | Receives metrics, report, and sample predictions | Rerun to write elsewhere |
-| `model` | mapping | same fields as `configs/models/practical_rife_v4_25.yaml` | Practical-RIFE checkpoint, timestep, scale, padding, and device settings | Yes |
+| `output_dir` | path string | default `outputs/candidate_validation/practical_rife_v4_26/stage1_default` | Receives metrics, report, and sample predictions | Rerun to write elsewhere |
+| `model` | mapping | same fields as `configs/models/practical_rife_v4_26.yaml` | Practical-RIFE checkpoint, timestep, scale, padding, and device settings | Yes |
 | `thresholds.*` | floats or `null` | same meaning as EMA/AMT candidate validation | Controls approval/rejection based on global aggregate metrics | Yes |
 | `limit_samples` | integer or `null` | default `null`; positive integer for smoke runs | Caps evaluated test samples | Yes |
 | `compute_lpips` | boolean | default `true`; use `--no-lpips` for smoke runs | Computes LPIPS when available | Yes |
@@ -132,7 +132,7 @@ Command:
 
 ```bash
 uv run python -m video_interpolation.cli rife validate-candidate \
-  --config configs/validation/practical_rife_v4_25_candidate.yaml \
+  --config configs/validation/practical_rife_v4_26_candidate.yaml \
   --manifest dataset_versions/stage1_default/test_all.csv \
   --output-dir /tmp/rife_candidate_validation_smoke \
   --limit-samples 1 \

@@ -12,9 +12,11 @@ Compact repository index for coding agents. This file describes the current proj
 - `docs/` — human-facing workflow documentation.
 - `infra/` — local infrastructure definitions for Stage 1 services.
 - `model_repos/` — external VFI model repositories used as implementation references and integration targets.
-- `model_weights/` — pretrained model weights and model-specific runtime files.
+- `model_exports/` — generated model export artifacts such as Stage 2 ONNX exports; artifacts are runtime/developer outputs, not source model code.
+- `model_weights/` — pretrained model weights and model-specific checkpoint artifacts.
+- `outputs/` — generated local reports, predictions, inference videos, and validation artifacts.
 - `src/` — local Python package for Stage 1 ML core code.
-- `tests/` — focused tests for critical Stage 1 behavior.
+- `tests/` — focused tests for critical Stage 1 behavior plus Stage 2 inference runtime/export behavior.
 
 ## `.agent/`
 
@@ -34,7 +36,7 @@ Agent-facing documentation and development logs.
 
 ### `.agent/docs/exec-plans/active/`
 
-- No active ExecPlan. Stage 2 planning should create `02_inference_runtime_refactor.execplan.md` here only after analysis is accepted and clarification questions are answered.
+- `02_inference_runtime_refactor.execplan.md` — active Stage 2 ExecPlan for inference runtime refactor, PyTorch/Nx serving readiness, ONNX feasibility/export/runtime where feasible, and minimal BentoML compatibility proof.
 
 ### `.agent/docs/exec-plans/completed/`
 
@@ -137,7 +139,7 @@ Practical-RIFE model repository.
 
 ## `model_weights/`
 
-Pretrained model weights and model-specific runtime files.
+Pretrained model weights and model-specific checkpoint artifacts.
 
 ### `model_weights/AMT/`
 
@@ -159,25 +161,42 @@ Pretrained EMA-VFI weights.
 
 ### `model_weights/Practical-RIFE/`
 
-Pretrained Practical-RIFE weights and accompanying model files.
+Pretrained Practical-RIFE weights and accompanying upstream bundle files. Stage 2 runtime source is project-owned under `src/video_interpolation/inference_runtime/rife_upstream/`.
 
-- `RIFEv4.25/train_log/` — RIFE v4.25 weights and model files.
-- `RIFEv4.26/train_log/` — RIFE v4.26 weights and model files.
+- `RIFEv4.25/train_log/` — RIFE v4.25 `flownet.pkl` checkpoint and upstream bundled files; available as an alternative checkpoint selection.
+- `RIFEv4.26/train_log/` — RIFE v4.26 `flownet.pkl` checkpoint and upstream bundled files; Stage 2 default checkpoint selection.
+
+## `model_exports/`
+
+Generated model export artifacts.
+
+### `model_exports/onnx/`
+
+Stage 2 ONNX export output root. Export commands write model/version-oriented subdirectories such as `ema_vfi_small/` and `practical_rife_v4_26/` with original and optional simplified `.onnx` files.
+
+## `outputs/`
+
+Generated reports and local workflow artifacts.
+
+### `outputs/onnx_validation/`
+
+Stage 2 ONNX Runtime validation output root. `ema validate-onnx` and `rife validate-onnx` write per-model `equivalence_report.json`, `equivalence_metrics.csv`, and optional sample PyTorch/ONNX/difference PNGs for tensor mismatches.
 
 ## `src/video_interpolation/`
 
 Local Stage 1 Python package.
 
 - `adapters/` — shared model adapter interface plus EMA-VFI-small, AMT-S, Practical-RIFE, and non-neural baseline adapters.
-- `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, output path layout, MLflow run naming, and per-target measurement CSV export.
+- `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, factor-aware output path layout, MLflow run naming, and per-target measurement CSV export including runtime options.
 - `baselines.py` — duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
 - `amt_preflight.py` — lightweight AMT-S import/model/checkpoint compatibility check.
-- `cli.py` — Typer developer CLI with settings display, directory-wide all-target inference, EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
+- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, request-time Practical-RIFE scale options, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export and ONNX Runtime validation commands, EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
 - `contracts.py` — compact artifact contracts and relative-path validation helpers.
 - `data/` — source preprocessing and source-level indexing code.
 - `ema_preflight.py` — lightweight EMA-VFI-small import/checkpoint compatibility check.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
-- `inference.py` — shared local 2x video inference workflow with PyAV/FFmpeg output encoding, audio remuxing, and EMA/AMT/Practical-RIFE adapter entrypoints.
+- `inference_runtime/` — Stage 2 request/result inference API, interpolation mode validation, runtime input/output containers, and backend abstractions.
+- `inference.py` — shared local video inference workflow using Stage 2 request/result calls when adapters support them, fixed 2x/arbitrary Nx frame interleaving for EMA/RIFE, request runtime options such as Practical-RIFE scale, PyAV/FFmpeg output encoding, audio remuxing, and legacy fixed-2x adapter fallback.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
 - `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs.
 - `rife_preflight.py` — lightweight Practical-RIFE import/model/checkpoint compatibility check.
@@ -193,7 +212,19 @@ Stage 1 model adapter implementations.
 - `amt.py` — AMT-S adapter using `model_repos/AMT`, upstream `cfgs/AMT-S.yaml`, and `model_weights/AMT/amt-s.pth`.
 - `baseline.py` — ModelAdapter-compatible wrapper for duplicate-left, blend, and Farneback baseline methods.
 - `ema_vfi.py` — EMA-VFI-small adapter using `model_repos/EMA-VFI` and explicit local checkpoints.
-- `rife.py` — Practical-RIFE adapter using `model_repos/Practical-RIFE` and `model_weights/Practical-RIFE/RIFEv4.25/train_log`.
+- `rife.py` — Practical-RIFE adapter using project-owned runtime source and Practical-RIFE v4.26 weights by default, with v4.25 still available by config.
+
+### `src/video_interpolation/inference_runtime/`
+
+Stage 2 inference runtime subsystem.
+
+- `api.py` — `InferenceMode`, `RuntimeBackendKind`, request/result dataclasses, runtime input/output containers, interpolation-factor validation, and timestep generation.
+- `backends/` — shared runtime backend lifecycle/execution abstractions, callable-based PyTorch backend skeleton, and ONNX Runtime backend/session wrapper.
+- `ema.py` — prediction-only EMA-VFI PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API.
+- `onnx_export.py` — ONNX export config/results, EMA and Practical-RIFE neural-core wrapper modules, dynamic/static shape export helpers, ONNX checker validation, and optional simplification.
+- `onnx_validation.py` — ONNX artifact resolution, PyTorch-vs-ONNX tensor equivalence metrics, report writing, and sample image/difference output helpers.
+- `rife.py` — prediction-only Practical-RIFE PyTorch and ONNX runtimes that adapt fixed 2x and arbitrary/Nx tensor-pair inference to the Stage 2 request/result API.
+- `rife_upstream/` — project-owned Practical-RIFE v4.26 runtime source copied from the local `train_log` code and patched for stable imports/device-aware warping.
 
 ### `src/video_interpolation/data/`
 
@@ -220,18 +251,21 @@ Stage 1 YAML config layout and implemented workflow configs.
 - `inference/README.md` — operational field reference for local EMA, AMT, and Practical-RIFE inference configs.
 - `inference/amt_s_2x.yaml` — parameters for local AMT-S 2x video inference.
 - `inference/baseline_2x.yaml` — parameters for local baseline 2x video inference.
-- `inference/ema_vfi_small_2x.yaml` — parameters for local EMA-VFI-small 2x video inference.
-- `inference/practical_rife_v4_25_2x.yaml` — parameters for local Practical-RIFE v4.25 2x video inference.
+- `inference/ema_vfi_small_2x.yaml` — parameters for local EMA-VFI-small fixed 2x video inference defaults with runtime mode/factor fields for CLI Nx overrides.
+- `inference/practical_rife_v4_26_2x.yaml` — parameters for local Practical-RIFE v4.26 fixed 2x video inference defaults with runtime mode/factor fields for CLI Nx overrides.
+- `inference/practical_rife_v4_25_2x.yaml` — alternative Practical-RIFE v4.25 fixed 2x video inference config with runtime mode/factor fields.
 - `models/README.md` — operational field reference for model adapter configs.
 - `models/amt_s.yaml` — AMT-S adapter/checkpoint/device/config settings.
-- `models/ema_vfi_small.yaml` — EMA-VFI-small adapter/checkpoint/device config.
-- `models/practical_rife_v4_25.yaml` — Practical-RIFE v4.25 adapter/checkpoint/device config.
+- `models/ema_vfi_small.yaml` — EMA-VFI-small adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields; Stage 2 inference points at `ours_small_t.pkl`.
+- `models/practical_rife_v4_26.yaml` — Practical-RIFE v4.26 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields.
+- `models/practical_rife_v4_25.yaml` — alternative Practical-RIFE v4.25 adapter/checkpoint/device config with fixed 2x/arbitrary Nx capability fields.
 - `training/README.md` — operational field reference for EMA fine-tuning config.
 - `training/ema_vfi_small_finetune.yaml` — EMA-VFI-small fine-tuning and eval-only runner config.
 - `validation/README.md` — operational field reference for EMA, AMT, and Practical-RIFE candidate validation configs.
 - `validation/amt_s_candidate.yaml` — AMT-S candidate/eval-only validation thresholds and outputs config.
 - `validation/ema_vfi_small_candidate.yaml` — EMA-VFI-small candidate validation thresholds and outputs config.
-- `validation/practical_rife_v4_25_candidate.yaml` — Practical-RIFE v4.25 candidate/eval-only validation thresholds and outputs config.
+- `validation/practical_rife_v4_26_candidate.yaml` — Practical-RIFE v4.26 candidate/eval-only validation thresholds and outputs config.
+- `validation/practical_rife_v4_25_candidate.yaml` — alternative Practical-RIFE v4.25 candidate/eval-only validation config.
 
 ## `infra/`
 
@@ -250,6 +284,7 @@ Stage 1 MLflow infrastructure with PostgreSQL metadata storage and MinIO artifac
 Human-facing project documentation.
 
 - `stage1_ml_core.md` — Stage 1 workflow notes for current implemented milestones.
+- `stage2_inference_runtime_refactor.md` — Stage 2 runtime API, local fixed 2x/Nx video inference behavior, request-time Practical-RIFE scale policy, backend boundaries, Practical-RIFE source policy, ONNX export/runtime validation status, and current BentoML deferrals.
 
 ## `tests/`
 
@@ -258,9 +293,13 @@ Focused behavior tests.
 - `test_contracts.py` — compact artifact contract and relative path validation tests.
 - `test_amt_adapter.py` — AMT adapter prediction and shared config parsing tests.
 - `test_datasets_metrics_baselines.py` — triplet dataset loading, metric sanity, and baseline evaluation smoke tests.
+- `test_ema_adapter.py` — EMA-VFI runtime request/result behavior, adapter wrapper compatibility, training-path isolation, and checkpoint normalization tests.
 - `test_indexing.py` — Vimeo source-index generation tests.
-- `test_inference.py` — local inference config resolution and PyAV writer smoke tests.
+- `test_inference.py` — local inference config resolution, PyAV writer smoke tests, video-level request/result Nx frame ordering/count/FPS tests, and batch measurement metadata tests.
+- `test_inference_runtime_api.py` — Stage 2 request/result API validation, timestep generation, and backend skeleton tests.
+- `test_onnx_export.py` — Stage 2 ONNX export config/path validation, neural-core wrapper behavior, artifact writing, and export failure reporting tests.
+- `test_onnx_runtime.py` — Stage 2 ONNX Runtime backend/provider validation, artifact resolution, tiny-session execution, model-specific ONNX runtime behavior, equivalence metrics, and report writing tests.
 - `test_preprocessing.py` — scene-safe sampling, quota termination, frame-step validation, and static-triplet filtering tests.
-- `test_rife_adapter.py` — Practical-RIFE adapter prediction, padding, checkpoint normalization, and shared config parsing tests.
+- `test_rife_adapter.py` — Practical-RIFE runtime request/result behavior, adapter wrapper compatibility, padding, checkpoint normalization, and config parsing tests.
 - `test_validation_and_adapters.py` — candidate validation decision logic and prediction artifact smoke tests with a fake adapter.
 - `test_versioning.py` — global index and dataset-version split/manifest generation tests.

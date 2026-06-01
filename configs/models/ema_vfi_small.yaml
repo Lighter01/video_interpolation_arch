@@ -1,6 +1,14 @@
 model_name: ema_vfi_small
 repo_name: EMA-VFI
-checkpoint_path: EMA-VFI/ours_small.pkl
+checkpoint_path: EMA-VFI/ours_small_t.pkl
+inference_checkpoint_path: EMA-VFI/ours_small_t.pkl
+training_checkpoint_path: EMA-VFI/ours_small.pkl
+supported_modes:
+  - fixed_2x
+  - arbitrary_nx
+default_interpolation_factor: 2
+min_interpolation_factor: 2
+max_interpolation_factor: 8
 device: cuda
 tta: false
 fast_tta: false

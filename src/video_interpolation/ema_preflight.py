@@ -56,7 +56,7 @@ def _ema_import_context(repo_path: Path) -> Iterator[None]:
 
 
 def _configure_ema_small(config_module: Any) -> None:
-    config_module.MODEL_CONFIG["LOGNAME"] = "ours_small"
+    config_module.MODEL_CONFIG["LOGNAME"] = "ours_small_t"
     config_module.MODEL_CONFIG["MODEL_ARCH"] = config_module.init_model_config(
         F=16,
         W=7,
@@ -76,7 +76,7 @@ def run_ema_vfi_small_preflight(settings: Settings | None = None) -> PreflightRe
     report = PreflightReport(status="ok")
 
     repo_path = settings.model_repo_path("EMA-VFI")
-    checkpoint_path = settings.model_weight_path("EMA-VFI", "ours_small.pkl")
+    checkpoint_path = settings.model_weight_path("EMA-VFI", "ours_small_t.pkl")
 
     if repo_path.is_dir():
         report.add("ema_repo_path", "ok", str(repo_path))
@@ -116,7 +116,7 @@ def run_ema_vfi_small_preflight(settings: Settings | None = None) -> PreflightRe
                 report.add(
                     "ema_initialize",
                     "blocked",
-                    "CUDA is unavailable; upstream EMA-VFI Trainer.Model hardcodes cuda device setup.",
+                    "CUDA is unavailable and the default EMA-VFI preflight initializes the cuda checkpoint path.",
                 )
                 return report
 

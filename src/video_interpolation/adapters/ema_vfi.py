@@ -3,7 +3,7 @@ import gc
 import importlib
 import os
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,12 @@ from typing import Any
 import torch
 
 from video_interpolation.adapters.base import AdapterEnvironmentReport, ModelAdapter, ModelAdapterError
+from video_interpolation.inference_runtime.api import FramePairRequest, FramePairResult, InferenceMode
+from video_interpolation.inference_runtime.ema import (
+    EMAVFIPyTorchRuntime,
+    EMAVFIPyTorchRuntimeConfig,
+    prepare_ema_image_tensor,
+)
 from video_interpolation.settings import Settings, load_settings
 
 
@@ -19,6 +25,12 @@ class EMAVFIAdapterConfig:
     model_name: str = "ema_vfi_small"
     repo_name: str = "EMA-VFI"
     checkpoint_path: Path = Path("EMA-VFI/ours_small.pkl")
+    inference_checkpoint_path: Path = Path("EMA-VFI/ours_small_t.pkl")
+    training_checkpoint_path: Path = Path("EMA-VFI/ours_small.pkl")
+    supported_modes: tuple[str, ...] = ("fixed_2x", "arbitrary_nx")
+    default_interpolation_factor: int = 2
+    min_interpolation_factor: int = 2
+    max_interpolation_factor: int = 8
     device: str = "cuda"
     tta: bool = False
     fast_tta: bool = False
@@ -28,8 +40,11 @@ class EMAVFIAdapterConfig:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "EMAVFIAdapterConfig":
         values = dict(data or {})
-        if "checkpoint_path" in values:
-            values["checkpoint_path"] = Path(values["checkpoint_path"])
+        for key in ("checkpoint_path", "inference_checkpoint_path", "training_checkpoint_path"):
+            if key in values:
+                values[key] = Path(values[key])
+        if "supported_modes" in values:
+            values["supported_modes"] = tuple(str(mode) for mode in values["supported_modes"])
         return cls(**values)
 
 
@@ -46,6 +61,7 @@ class EMAVFIAdapter(ModelAdapter):
         self.model_name = self.config.model_name
         self._model: Any | None = None
         self._input_padder_cls: Any | None = None
+        self._runtime: EMAVFIPyTorchRuntime | None = None
         self._repo_context: contextlib.AbstractContextManager[None] | None = None
         self._repo_context_entered = False
         self._device = torch.device(self.config.device)
@@ -70,7 +86,7 @@ class EMAVFIAdapter(ModelAdapter):
             report.add(
                 "cuda_available",
                 "blocked",
-                "CUDA is unavailable; upstream EMA-VFI Trainer.Model hardcodes cuda device setup.",
+                "CUDA is unavailable and this EMA adapter config requests cuda.",
             )
         else:
             report.add("cuda_available", "ok", str(torch.cuda.is_available()))
@@ -93,17 +109,16 @@ class EMAVFIAdapter(ModelAdapter):
         if self._model is not None:
             return
         if self.config.device == "cuda" and not torch.cuda.is_available():
-            raise ModelAdapterError(
-                "CUDA is unavailable. EMA-VFI upstream Trainer.Model currently hardcodes CUDA setup."
-            )
+            raise ModelAdapterError("CUDA is unavailable and this EMA adapter config requests cuda.")
         try:
             self._enter_repo_context()
             config_module = importlib.import_module("config")
             _configure_ema_small(config_module)
             trainer_module = importlib.import_module("Trainer")
             padder_module = importlib.import_module("benchmark.utils.padder")
-            self._model = trainer_module.Model(-1)
+            self._model = trainer_module.Model(-1, device=self._device)
             self._input_padder_cls = padder_module.InputPadder
+            self._runtime = None
         except Exception:
             self.close()
             raise
@@ -132,24 +147,32 @@ class EMAVFIAdapter(ModelAdapter):
         self._model.eval()
 
     def predict_pair(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        request = FramePairRequest(left=left, right=right)
+        return self.predict_frame_pair(request).middle_frame
+
+    def predict_intermediate_frames(
+        self,
+        left: torch.Tensor,
+        right: torch.Tensor,
+        *,
+        interpolation_factor: int | None = None,
+        timesteps: Sequence[float] | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        request = FramePairRequest(
+            left=left,
+            right=right,
+            mode=InferenceMode.ARBITRARY_NX,
+            interpolation_factor=(
+                self.config.default_interpolation_factor if interpolation_factor is None else interpolation_factor
+            ),
+            timesteps=timesteps,
+        )
+        return self.predict_frame_pair(request).intermediate_frames
+
+    def predict_frame_pair(self, request: FramePairRequest) -> FramePairResult:
         self._require_model()
         self.eval()
-        left_batch = _prepare_image_tensor(left, self._device)
-        right_batch = _prepare_image_tensor(right, self._device)
-        if left_batch.shape != right_batch.shape:
-            raise ValueError(f"left and right tensors must have matching shape: {left.shape} vs {right.shape}")
-
-        with torch.no_grad():
-            padder = self._input_padder_cls(left_batch.shape, divisor=self.config.divisor)
-            left_padded, right_padded = padder.pad(left_batch, right_batch)
-            prediction = self._model.inference(
-                left_padded,
-                right_padded,
-                TTA=self.config.tta,
-                fast_TTA=self.config.fast_tta,
-            )
-            prediction = padder.unpad(prediction)
-        return prediction[0].detach().cpu().clamp(0.0, 1.0).contiguous()
+        return self._require_runtime().predict(request)
 
     def train_step(
         self,
@@ -160,9 +183,9 @@ class EMAVFIAdapter(ModelAdapter):
     ) -> tuple[torch.Tensor, float]:
         self._require_model()
         self.train()
-        left_device = _prepare_image_tensor(left, self._device)
-        middle_device = _prepare_image_tensor(middle, self._device)
-        right_device = _prepare_image_tensor(right, self._device)
+        left_device = prepare_ema_image_tensor(left, self._device)
+        middle_device = prepare_ema_image_tensor(middle, self._device)
+        right_device = prepare_ema_image_tensor(right, self._device)
         padder = self._input_padder_cls(left_device.shape, divisor=self.config.divisor)
         left_padded, middle_padded, right_padded = padder.pad(left_device, middle_device, right_device)
         imgs = torch.cat((left_padded, right_padded), dim=1)
@@ -174,9 +197,9 @@ class EMAVFIAdapter(ModelAdapter):
     def eval_step(self, left: torch.Tensor, middle: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
         self._require_model()
         self.eval()
-        left_device = _prepare_image_tensor(left, self._device)
-        middle_device = _prepare_image_tensor(middle, self._device)
-        right_device = _prepare_image_tensor(right, self._device)
+        left_device = prepare_ema_image_tensor(left, self._device)
+        middle_device = prepare_ema_image_tensor(middle, self._device)
+        right_device = prepare_ema_image_tensor(right, self._device)
         padder = self._input_padder_cls(left_device.shape, divisor=self.config.divisor)
         left_padded, middle_padded, right_padded = padder.pad(left_device, middle_device, right_device)
         imgs = torch.cat((left_padded, right_padded), dim=1)
@@ -187,6 +210,9 @@ class EMAVFIAdapter(ModelAdapter):
         return prediction.detach().cpu().clamp(0.0, 1.0)
 
     def close(self) -> None:
+        if self._runtime is not None:
+            self._runtime.close()
+        self._runtime = None
         self._model = None
         self._input_padder_cls = None
         if self._repo_context is not None and self._repo_context_entered:
@@ -200,6 +226,25 @@ class EMAVFIAdapter(ModelAdapter):
     def _require_model(self) -> None:
         if self._model is None:
             raise ModelAdapterError("EMA-VFI model is not built. Call build_model/load_checkpoint first.")
+
+    def _require_runtime(self) -> EMAVFIPyTorchRuntime:
+        self._require_model()
+        if self._input_padder_cls is None:
+            raise ModelAdapterError("EMA-VFI input padder is not available. Call build_model/load_checkpoint first.")
+        if self._runtime is None:
+            self._runtime = EMAVFIPyTorchRuntime(
+                self._model,
+                self._input_padder_cls,
+                EMAVFIPyTorchRuntimeConfig(
+                    model_name=self.model_name,
+                    device=self._device,
+                    divisor=self.config.divisor,
+                    tta=self.config.tta,
+                    fast_tta=self.config.fast_tta,
+                ),
+            )
+            self._runtime.load()
+        return self._runtime
 
     def _enter_repo_context(self) -> None:
         if self._repo_context_entered:
@@ -255,11 +300,3 @@ def _normalise_ema_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
     if not converted:
         raise ModelAdapterError("EMA-VFI checkpoint did not contain loadable tensor weights")
     return converted
-
-
-def _prepare_image_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
-    if tensor.ndim == 3:
-        tensor = tensor.unsqueeze(0)
-    if tensor.ndim != 4 or tensor.shape[1] != 3:
-        raise ValueError(f"Expected image tensor shape CxHxW or BxCxHxW with 3 channels, got {tuple(tensor.shape)}")
-    return tensor.to(device=device, dtype=torch.float32).clamp(0.0, 1.0)

@@ -9,16 +9,17 @@ from config import *
 
     
 class Model:
-    def __init__(self, local_rank):
+    def __init__(self, local_rank, device="cuda"):
         backbonetype, multiscaletype = MODEL_CONFIG['MODEL_TYPE']
         backbonecfg, multiscalecfg = MODEL_CONFIG['MODEL_ARCH']
         self.net = multiscaletype(backbonetype(**backbonecfg), **multiscalecfg)
         self.name = MODEL_CONFIG['LOGNAME']
+        self._device = torch.device(device)
         self.device()
 
         # train
         self.optimG = AdamW(self.net.parameters(), lr=2e-4, weight_decay=1e-4)
-        self.lap = LapLoss()
+        self.lap = LapLoss(device=self._device)
         if local_rank != -1:
             self.net = DDP(self.net, device_ids=[local_rank], output_device=local_rank)
 
@@ -29,7 +30,7 @@ class Model:
         self.net.eval()
 
     def device(self):
-        self.net.to(torch.device("cuda"))
+        self.net.to(self._device)
 
     def load_model(self, name=None, rank=0):
         def convert(param):
