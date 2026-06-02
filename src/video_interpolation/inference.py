@@ -503,7 +503,8 @@ def run_video_inference(
             "audio_streams_preserved": audio_streams_preserved,
             "quality_evaluation_enabled": quality_config.enabled,
             "quality_sample_count": quality_config.sample_count,
-            "quality_scene_cut_ssim_threshold": quality_config.scene_cut_ssim_threshold,
+            "quality_max_image_side": quality_config.max_image_side,
+            "quality_write_triplets": quality_config.write_triplets,
             "quality_fail_policy": quality_config.fail_policy,
             "quality_triplet_output_dir": str(quality_result.triplet_output_dir)
             if quality_result.triplet_output_dir is not None

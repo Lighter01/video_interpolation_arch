@@ -379,8 +379,7 @@ def test_video_inference_quality_evaluation_uses_main_mode_with_factor_two(tmp_p
                 enabled=True,
                 triplet_output_dir=triplet_root,
                 sample_count=1,
-                random_seed=0,
-                scene_cut_ssim_threshold=None,
+                write_triplets=True,
                 source_video_id="source123",
             ),
             codec="libx264",
@@ -420,7 +419,6 @@ def test_video_inference_quality_warn_policy_preserves_video_result(tmp_path) ->
             quality_evaluation=VideoQualityEvaluationConfig(
                 enabled=True,
                 sample_count=1,
-                scene_cut_ssim_threshold=None,
                 fail_policy="warn",
             ),
             codec="libx264",

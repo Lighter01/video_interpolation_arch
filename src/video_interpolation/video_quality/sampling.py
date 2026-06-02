@@ -2,14 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import random
 
+import av
 from PIL import Image
-
-from video_interpolation.data.preprocessing import (
-    decode_selected_video_frames,
-    read_video_metadata,
-)
 
 
 @dataclass(frozen=True)
@@ -20,50 +15,39 @@ class DecodedTriplet:
     right: Image.Image
 
 
-def sample_triplet_starts(
+def first_triplet_starts(
     *,
     frame_count: int,
     sample_count: int,
-    random_seed: int | None = None,
 ) -> tuple[int, ...]:
     if frame_count < 3 or sample_count <= 0:
         return ()
-    valid_starts = tuple(range(frame_count - 2))
-    if sample_count >= len(valid_starts):
-        return valid_starts
-    rng = random.Random(random_seed)
-    return tuple(sorted(rng.sample(valid_starts, sample_count)))
+    return tuple(range(min(sample_count, frame_count - 2)))
 
 
-def selected_triplets_from_video(
+def first_triplets_from_video(
     video_path: Path,
     *,
     sample_count: int,
-    random_seed: int | None = None,
-    decode_strategy: str = "auto",
 ) -> tuple[DecodedTriplet, ...]:
-    metadata = read_video_metadata(video_path)
-    starts = sample_triplet_starts(
-        frame_count=metadata.frame_count,
-        sample_count=sample_count,
-        random_seed=random_seed,
-    )
-    if not starts:
+    if sample_count <= 0:
         return ()
 
-    frame_indices = sorted({index for start in starts for index in (start, start + 1, start + 2)})
-    decode_result = decode_selected_video_frames(
-        video_path,
-        frame_indices,
-        fps=metadata.fps,
-        strategy=decode_strategy,
-    )
+    decoded_frames: list[Image.Image] = []
+    max_frames = sample_count + 2
+    with av.open(str(video_path), mode="r") as container:
+        try:
+            stream = container.streams.video[0]
+        except IndexError as exc:
+            raise ValueError(f"{video_path} does not contain a video stream.") from exc
+        for frame in container.decode(stream):
+            decoded_frames.append(frame.to_image().convert("RGB").copy())
+            if len(decoded_frames) >= max_frames:
+                break
+
     triplets: list[DecodedTriplet] = []
-    for start in starts:
-        frames = [decode_result.frames.get(index) for index in (start, start + 1, start + 2)]
-        if any(frame is None for frame in frames):
-            continue
-        left, middle, right = frames
+    for start in first_triplet_starts(frame_count=len(decoded_frames), sample_count=sample_count):
+        left, middle, right = decoded_frames[start : start + 3]
         triplets.append(
             DecodedTriplet(
                 start_index=start,

@@ -69,7 +69,7 @@ Serving defaults:
 - interpolation mode: `arbitrary_nx`;
 - service-level interpolation factor: integer `2..4`;
 - Practical-RIFE scale: `1.0` by default, allowed values `0.25`, `0.5`, `1.0`, `2.0`, and `4.0`;
-- sampled quality evaluation: enabled by default with warn fail policy;
+- first-triplet quality evaluation: enabled by default with warn fail policy;
 - default codec for examples: `libx264`.
 
 The service-level factor range is intentionally narrower than the runtime's general `2..8` support. This keeps the compatibility examples conservative while preserving broader local/runtime APIs for non-serving experiments.
@@ -110,7 +110,7 @@ result = runner.run(
 )
 ```
 
-Serving quality evaluation is implemented below the BentoML layer in the shared inference stack. It samples up to 16 source triplets by default, writes accepted triplets in Vimeo-style layout next to the output video, and returns aggregate `quality_psnr_mean`, `quality_ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error` through `VideoInferenceResult`. Pass `enable_quality_evaluation=False` to `runner.run(...)` or `run_practical_rife_video_inference(...)` to disable it for a request. Pass `quality_triplet_output_dir=...` when a backend worker wants triplets written inside a request-specific temporary directory.
+Serving quality evaluation is implemented below the BentoML layer in the shared inference stack. It evaluates up to 16 first overlapping source triplets by default, resizes quality-only frames so the larger side is at most 360 pixels, and returns aggregate `quality_psnr_mean`, `quality_ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error` through `VideoInferenceResult`. Triplet PNG persistence is disabled by default; pass `write_quality_triplets=True` and `quality_triplet_output_dir=...` when a backend worker wants Vimeo-style triplets written inside a request-specific temporary directory. Pass `enable_quality_evaluation=False` to `runner.run(...)` or `run_practical_rife_video_inference(...)` to disable quality evaluation for a request.
 
 Use ONNX Runtime only when the deployment will package the accepted artifact and the adjacent external-data file:
 
@@ -253,7 +253,7 @@ uv run python -m video_interpolation.cli rife infer-video \
   --disable-mlflow
 ```
 
-Practical-RIFE local video inference can optionally run sampled quality evaluation after the output video is generated:
+Practical-RIFE local video inference can optionally run lightweight quality evaluation after the output video is generated:
 
 ```bash
 uv run python -m video_interpolation.cli rife infer-video \
@@ -268,14 +268,14 @@ uv run python -m video_interpolation.cli rife infer-video \
   --limit-pairs 2 \
   --enable-quality-evaluation \
   --quality-sample-count 16 \
-  --quality-random-seed 0 \
+  --quality-max-image-side 360 \
+  --write-quality-triplets \
   --quality-triplet-output-dir /tmp/dora_quality_triplets \
-  --quality-scene-cut-ssim-threshold 0.75 \
   --quality-fail-policy warn \
   --disable-mlflow
 ```
 
-Quality evaluation samples original input triplets `(frame_i, frame_i+1, frame_i+2)`, rejects likely scene cuts by adjacent-frame SSIM, writes accepted triplets as `<triplet_output_dir>/<source_video_id>/<triplet_id>/im1.png`, `im2.png`, and `im3.png`, then compares the model prediction for `left/right -> middle` against `im2.png`. The quality request keeps the same inference mode as the main run, but always uses interpolation factor `2` because each sampled triplet has exactly one real middle frame.
+Quality evaluation uses the first `--quality-sample-count` overlapping input triplets `(frame_i, frame_i+1, frame_i+2)`, so it decodes at most `sample_count + 2` source frames and does not seek across the video. It resizes each source frame for quality evaluation only, reducing the larger side to `--quality-max-image-side` pixels while preserving aspect ratio; use `--quality-max-image-side 0` to score full-resolution quality frames. It currently assumes one scene and does not run adjacent-frame scene-cut SSIM filtering. Triplet PNG persistence is disabled by default; add `--write-quality-triplets` to write `<triplet_output_dir>/<source_video_id>/<triplet_id>/im1.png`, `im2.png`, and `im3.png`. The quality request compares the model prediction for `left/right -> middle` against resized `im2`, keeps the same inference mode as the main run, and always uses interpolation factor `2` because each source triplet has exactly one real middle frame.
 
 Directory-wide inference accepts the same runtime factor:
 
@@ -316,7 +316,7 @@ uv run python -m video_interpolation.cli benchmark runtime \
 
 The command supports `--backend torch|onnx`, `--execution-mode sequential|batched`, `--mode fixed_2x|arbitrary_nx`, `--interpolation-factor`, `--inference-batch-size`, one input video through `--input`, directory mode through `--input-dir`, `--limit-videos`, and `--limit-pairs`. Reports are written to `benchmark_report.json` and `benchmark_metrics.csv` under the selected `--output-dir`; generated benchmark videos are written under `videos/<profile>/`.
 
-For `practical_rife_v4_26`, benchmarks enable sampled quality evaluation by default so timing reports include its overhead. Use `--disable-quality-evaluation` to benchmark the same profile without the quality step. EMA benchmark profiles keep quality evaluation disabled by default because the current online quality feature is Practical-RIFE-only. Benchmark CSV/JSON and MLflow metrics include `quality_evaluation_enabled`, `quality_evaluation_sec`, `quality_psnr_mean`, `quality_ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error`.
+For `practical_rife_v4_26`, benchmarks enable first-triplet quality evaluation by default so timing reports include its overhead. Triplet PNG writing is disabled by default, so `quality_triplets_written` is normally `0` even when PSNR/SSIM were computed. Use `--disable-quality-evaluation` to benchmark the same profile without the quality step. EMA benchmark profiles keep quality evaluation disabled by default because the current online quality feature is Practical-RIFE-only. Benchmark CSV/JSON and MLflow metrics include `quality_evaluation_enabled`, `quality_evaluation_sec`, `quality_psnr_mean`, `quality_ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error`.
 
 MLflow logging is enabled by default through the shared project MLflow helper. The benchmark disables nested inference-run logging and writes one aggregate benchmark run. Use `--disable-mlflow` for local smoke runs when the tracking server is not running; generated videos are logged only with `--log-output-videos`.
 

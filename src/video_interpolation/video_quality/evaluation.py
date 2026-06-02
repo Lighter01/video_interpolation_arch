@@ -5,6 +5,7 @@ from pathlib import Path
 import uuid
 
 import numpy as np
+from PIL import Image
 import torch
 
 from video_interpolation.adapters.base import ModelAdapter
@@ -19,7 +20,7 @@ from video_interpolation.video_quality.config import (
     VideoQualityEvaluationConfig,
     VideoQualityEvaluationResult,
 )
-from video_interpolation.video_quality.sampling import DecodedTriplet, selected_triplets_from_video
+from video_interpolation.video_quality.sampling import DecodedTriplet, first_triplets_from_video
 from video_interpolation.video_quality.triplets import write_vimeo_triplet
 
 
@@ -41,33 +42,34 @@ def evaluate_video_quality(
 
     source_video_id = config.source_video_id or uuid.uuid4().hex[:12]
     root_dir = config.triplet_output_dir or output_path.parent
-    triplets = selected_triplets_from_video(
+    triplets = first_triplets_from_video(
         input_path,
         sample_count=config.sample_count,
-        random_seed=config.random_seed,
     )
 
     psnr_values: list[float] = []
     ssim_values: list[float] = []
     written_count = 0
-    for accepted_index, triplet in enumerate(_accepted_triplets(triplets, config.scene_cut_ssim_threshold)):
-        triplet_id = f"{accepted_index:06d}"
-        write_vimeo_triplet(
-            root_dir,
-            source_video_id=source_video_id,
-            triplet_id=triplet_id,
-            left=triplet.left,
-            middle=triplet.middle,
-            right=triplet.right,
-        )
-        written_count += 1
+    for triplet_index, triplet in enumerate(triplets):
+        if config.write_triplets:
+            triplet_id = f"{triplet_index:06d}"
+            write_vimeo_triplet(
+                root_dir,
+                source_video_id=source_video_id,
+                triplet_id=triplet_id,
+                left=triplet.left,
+                middle=triplet.middle,
+                right=triplet.right,
+            )
+            written_count += 1
+        metric_triplet = _resize_triplet_for_quality(triplet, max_image_side=config.max_image_side)
         prediction = _predict_quality_middle(
             adapter,
-            triplet,
+            metric_triplet,
             mode=mode,
             runtime_options=runtime_options,
         )
-        target = np.asarray(triplet.middle.convert("RGB"), dtype=np.uint8)
+        target = np.asarray(metric_triplet.middle.convert("RGB"), dtype=np.uint8)
         psnr_values.append(compute_psnr(prediction, target))
         ssim_values.append(compute_ssim(prediction, target))
 
@@ -85,20 +87,28 @@ def _validate_practical_rife_adapter(adapter: ModelAdapter) -> None:
         raise ValueError("Video quality evaluation is currently supported only for Practical-RIFE adapters.")
 
 
-def _accepted_triplets(
-    triplets: tuple[DecodedTriplet, ...],
-    scene_cut_ssim_threshold: float | None,
-) -> tuple[DecodedTriplet, ...]:
-    if scene_cut_ssim_threshold is None:
-        return triplets
-    accepted: list[DecodedTriplet] = []
-    for triplet in triplets:
-        left_middle = compute_ssim(np.asarray(triplet.left.convert("RGB")), np.asarray(triplet.middle.convert("RGB")))
-        middle_right = compute_ssim(np.asarray(triplet.middle.convert("RGB")), np.asarray(triplet.right.convert("RGB")))
-        if left_middle < scene_cut_ssim_threshold or middle_right < scene_cut_ssim_threshold:
-            continue
-        accepted.append(triplet)
-    return tuple(accepted)
+def _resize_triplet_for_quality(triplet: DecodedTriplet, *, max_image_side: int | None) -> DecodedTriplet:
+    return DecodedTriplet(
+        start_index=triplet.start_index,
+        left=_resize_for_quality(triplet.left, max_image_side=max_image_side),
+        middle=_resize_for_quality(triplet.middle, max_image_side=max_image_side),
+        right=_resize_for_quality(triplet.right, max_image_side=max_image_side),
+    )
+
+
+def _resize_for_quality(image: Image.Image, *, max_image_side: int | None) -> Image.Image:
+    rgb = image.convert("RGB")
+    if max_image_side is None:
+        return rgb.copy()
+
+    width, height = rgb.size
+    larger_side = max(width, height)
+    if larger_side <= max_image_side:
+        return rgb.copy()
+
+    scale = max_image_side / float(larger_side)
+    resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return rgb.resize(resized_size, Image.Resampling.LANCZOS)
 
 
 def _predict_quality_middle(

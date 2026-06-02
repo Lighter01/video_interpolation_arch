@@ -49,7 +49,7 @@ Practical-RIFE legacy opset 17 original/simplified artifacts remain loadable for
 
 ONNX validation outputs live under `outputs/onnx_validation/`. Synthetic checks use `ema validate-onnx` and `rife validate-onnx`; real image-pair checks use `ema validate-onnx-real` and `rife validate-onnx-real`. New Milestone 3 real-pair reports include the input group, command, torch device, artifact kind, graph I/O, pair ids, source frame paths, padded shapes, output shapes, MAE, max absolute error, MSE, PSNR, SSIM, and visual artifact paths.
 
-Runtime benchmark outputs live under `outputs/benchmarks/`. Milestone 8 uses `benchmark runtime` for full local video-pipeline benchmarks. The command runs `run_video_inference(...)`, writes real output videos plus `benchmark_report.json` and `benchmark_metrics.csv`, and records decode, preprocessing, model inference, postprocessing, encode/flush, optional audio remux, sampled quality evaluation when enabled, and total timings. MLflow logging is enabled by default and can be disabled with `--disable-mlflow` for local smoke runs.
+Runtime benchmark outputs live under `outputs/benchmarks/`. Milestone 8 uses `benchmark runtime` for full local video-pipeline benchmarks. The command runs `run_video_inference(...)`, writes real output videos plus `benchmark_report.json` and `benchmark_metrics.csv`, and records decode, preprocessing, model inference, postprocessing, encode/flush, optional audio remux, quality evaluation when enabled, and total timings. MLflow logging is enabled by default and can be disabled with `--disable-mlflow` for local smoke runs.
 
 Current EMA-VFI evidence:
 
@@ -307,7 +307,7 @@ The benchmark command uses the same Stage 2.5 video inference path as normal loc
 
 It does not implement a separate interpolation loop. It wraps the existing video inference workflow and disables nested inference MLflow logging so one aggregate benchmark run owns the benchmark reports.
 
-For `practical_rife_v4_26`, sampled quality evaluation is enabled by default in benchmark runs. It samples original source triplets, applies a lightweight adjacent-frame SSIM scene-cut rejection filter, writes accepted triplets as `<triplet_output_dir>/<source_video_id>/<triplet_id>/im1.png`, `im2.png`, and `im3.png`, and records aggregate PSNR/SSIM plus timing overhead. Use `--disable-quality-evaluation` to benchmark without this step. EMA benchmark runs keep quality evaluation disabled by default because the current online quality path is Practical-RIFE-only.
+For `practical_rife_v4_26`, quality evaluation is enabled by default in benchmark runs. It evaluates the first `sample_count` overlapping source triplets, decodes at most `sample_count + 2` source frames, resizes quality-only frames so the larger side is at most 360 pixels by default, assumes one scene, skips adjacent-frame scene-cut SSIM filtering, and records aggregate PSNR/SSIM plus timing overhead. Triplet PNG writing is disabled by default; local Practical-RIFE inference can opt in with `--write-quality-triplets`. Use `--disable-quality-evaluation` to benchmark without this step. EMA benchmark runs keep quality evaluation disabled by default because the current online quality path is Practical-RIFE-only.
 
 Supported runtime combinations:
 
@@ -388,7 +388,7 @@ Report fields:
 - ONNX provenance: provider and artifact path;
 - counts: source frames, pairs processed, generated frames, frames written, batch chunks, and model batch requests;
 - timing: decode, preprocessing/tensor conversion, model inference, postprocessing/frame conversion, video encode/flush, audio remux, quality evaluation, and total time;
-- quality: quality enabled flag, quality PSNR/SSIM means, sampled triplet count, triplet output directory, and quality error when warn-policy evaluation fails;
+- quality: quality enabled flag, quality PSNR/SSIM means, quality triplet count, triplet output directory, and quality error when warn-policy evaluation fails;
 - throughput: pairs/sec, generated frames/sec, model-only pairs/sec, and model-only generated frames/sec;
 - memory: peak PyTorch CUDA VRAM when a CUDA PyTorch benchmark is run in a CUDA-capable environment.
 

@@ -43,7 +43,8 @@ def test_practical_rife_serving_config_defaults_to_torch_cuda_sequential_nx() ->
     assert config.default_scale == 1.0
     assert config.quality_evaluation_enabled
     assert config.quality_sample_count == 16
-    assert config.quality_scene_cut_ssim_threshold == 0.75
+    assert config.quality_max_image_side == 360
+    assert not config.quality_write_triplets
 
 
 @pytest.mark.parametrize("factor", [2, 3, 4])
@@ -77,6 +78,10 @@ def test_practical_rife_serving_rejects_invalid_static_config_values() -> None:
         PracticalRIFEServingConfig(execution_mode="batched")
     with pytest.raises(ValueError, match="arbitrary_nx"):
         PracticalRIFEServingConfig(interpolation_mode="fixed_2x")
+    with pytest.raises(ValueError, match="quality_write_triplets"):
+        PracticalRIFEServingConfig(quality_write_triplets=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="quality_max_image_side"):
+        PracticalRIFEServingConfig(quality_max_image_side=0)
 
 
 def test_practical_rife_serving_runner_fails_before_model_load_for_bad_paths(tmp_path: Path) -> None:

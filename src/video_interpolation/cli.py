@@ -2053,30 +2053,29 @@ def rife_infer_video(
     enable_quality_evaluation: bool = typer.Option(
         False,
         "--enable-quality-evaluation",
-        help="Sample source triplets and compute Practical-RIFE PSNR/SSIM after video inference.",
+        help="Evaluate the first source triplets and compute Practical-RIFE PSNR/SSIM after video inference.",
     ),
     quality_triplet_output_dir: Path | None = typer.Option(
         None,
         "--quality-triplet-output-dir",
-        help="Directory for sampled Vimeo-style quality triplets. Defaults next to the output video.",
+        help="Directory for Vimeo-style quality triplets when --write-quality-triplets is enabled.",
+    ),
+    write_quality_triplets: bool = typer.Option(
+        False,
+        "--write-quality-triplets",
+        help="Persist quality triplet PNGs. Disabled by default to keep quality evaluation lightweight.",
     ),
     quality_sample_count: int = typer.Option(
         16,
         "--quality-sample-count",
         min=0,
-        help="Maximum sampled source triplets for quality evaluation.",
+        help="Maximum first overlapping source triplets for quality evaluation.",
     ),
-    quality_random_seed: int | None = typer.Option(
-        None,
-        "--quality-random-seed",
-        help="Optional deterministic quality sampling seed.",
-    ),
-    quality_scene_cut_ssim_threshold: float | None = typer.Option(
-        0.75,
-        "--quality-scene-cut-ssim-threshold",
-        min=0.0,
-        max=1.0,
-        help="Reject sampled triplets with adjacent-frame SSIM below this value.",
+    quality_max_image_side: int | None = typer.Option(
+        360,
+        "--quality-max-image-side",
+        min=1,
+        help="Resize quality frames so their larger side is at most this many pixels. Use 0 to disable.",
     ),
     quality_fail_policy: str = typer.Option(
         "raise",
@@ -2121,8 +2120,8 @@ def rife_infer_video(
             enabled=enable_quality_evaluation,
             triplet_output_dir=quality_triplet_output_dir,
             sample_count=quality_sample_count,
-            random_seed=quality_random_seed,
-            scene_cut_ssim_threshold=quality_scene_cut_ssim_threshold,
+            max_image_side=None if quality_max_image_side == 0 else quality_max_image_side,
+            write_triplets=write_quality_triplets,
             fail_policy=quality_fail_policy,
         ),
     )
@@ -2799,7 +2798,7 @@ def benchmark_runtime(
     disable_quality_evaluation: bool = typer.Option(
         False,
         "--disable-quality-evaluation",
-        help="Disable Practical-RIFE sampled quality evaluation during benchmark runs.",
+        help="Disable Practical-RIFE quality evaluation during benchmark runs.",
     ),
     disable_mlflow: bool = typer.Option(
         False,

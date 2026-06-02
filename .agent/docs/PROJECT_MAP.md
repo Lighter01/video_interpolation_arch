@@ -37,7 +37,7 @@ Agent-facing documentation and development logs.
 
 ### `.agent/docs/exec-plans/active/`
 
-- `misc_video_quality_evaluation.execplan.md` — active task plan for optional Practical-RIFE sampled video quality evaluation in the shared inference pipeline.
+- `misc_video_quality_evaluation.execplan.md` — active task plan for optional Practical-RIFE first-triplet video quality evaluation in the shared inference pipeline.
 
 ### `.agent/docs/exec-plans/completed/`
 
@@ -245,12 +245,12 @@ Local Stage 1 Python package.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
 - `inference_benchmark.py` — Stage 2.5 video-pipeline runtime benchmarks over `run_video_inference(...)`, with single-video or directory inputs, CSV/JSON reports, generated benchmark videos, timing breakdowns for decode/preprocess/model/postprocess/encode/audio remux/quality evaluation, ONNX benchmark adapter wrappers, Practical-RIFE quality evaluation enabled by default, and optional aggregate MLflow logging.
 - `inference_runtime/` — Stage 2 request/result inference API, true model-batch API contracts, interpolation mode validation, runtime input/output containers, backend abstractions, ONNX export configuration including selectable legacy/dynamo exporters and constrained dynamic batch/H/W shapes, ONNX batch-request runtimes where viable, and ONNX validation reports with graph I/O plus padded/output shape metadata.
-- `inference.py` — shared local video inference workflow using Stage 2 request/result calls, chunked PyTorch model-batch video inference for EMA/RIFE through `ModelBatchRequest`, fixed 2x/arbitrary Nx frame interleaving, configurable `execution_mode` and `inference_batch_size`, request runtime options such as Practical-RIFE scale, optional sampled Practical-RIFE quality evaluation, PyAV/FFmpeg output encoding, audio remuxing, and sequential/legacy fallback.
+- `inference.py` — shared local video inference workflow using Stage 2 request/result calls, chunked PyTorch model-batch video inference for EMA/RIFE through `ModelBatchRequest`, fixed 2x/arbitrary Nx frame interleaving, configurable `execution_mode` and `inference_batch_size`, request runtime options such as Practical-RIFE scale, optional first-triplet Practical-RIFE quality evaluation, PyAV/FFmpeg output encoding, audio remuxing, and sequential/legacy fallback.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
 - `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs plus Stage 2.5 benchmark runs.
 - `rife_preflight.py` — lightweight Practical-RIFE import/model/checkpoint compatibility check.
-- `serving.py` — Practical-RIFE v4.26 serving-readiness facade with PyTorch CUDA defaults, ONNX alternative provider/artifact handling, sequential arbitrary-Nx factor `2..4` validation, sampled quality evaluation enabled by default with warn fail policy, persistent runner, convenience one-shot function, and ONNX video adapter wrapper.
-- `video_quality/` — Practical-RIFE sampled online quality evaluation helpers: config/result types, deterministic source-triplet sampling, selected-frame decoding, Vimeo-style triplet writing, scene-cut filtering, and PSNR/SSIM aggregation.
+- `serving.py` — Practical-RIFE v4.26 serving-readiness facade with PyTorch CUDA defaults, ONNX alternative provider/artifact handling, sequential arbitrary-Nx factor `2..4` validation, first-triplet quality evaluation enabled by default with warn fail policy, persistent runner, convenience one-shot function, and ONNX video adapter wrapper.
+- `video_quality/` — Practical-RIFE online quality evaluation helpers: config/result types, first-contiguous-triplet decoding, quality-only proportional resizing to max side 360 by default, opt-in Vimeo-style triplet writing, and PSNR/SSIM aggregation without scene-cut filtering.
 - `settings.py` — `pydantic-settings` runtime settings loaded from `.env`.
 - `training.py` — EMA-VFI-small fine-tuning and eval-only runner over triplet manifests.
 - `validation.py` — shared candidate validation metrics, reports, prediction samples, and threshold decisions for model adapters.
@@ -335,7 +335,7 @@ Stage 1 MLflow infrastructure with PostgreSQL metadata storage and MinIO artifac
 Human-facing project documentation.
 
 - `stage1_ml_core.md` — Stage 1 workflow notes for current implemented milestones.
-- `stage2_inference_runtime_refactor.md` — final Stage 2 handoff covering runtime structure, Practical-RIFE v4.26 PyTorch CUDA serving recommendation, ONNX Runtime CUDA alternative, BentoML example paths, local fixed 2x/Nx video inference behavior, optional Practical-RIFE sampled quality evaluation, backend boundaries, and backend/service developer next steps.
+- `stage2_inference_runtime_refactor.md` — final Stage 2 handoff covering runtime structure, Practical-RIFE v4.26 PyTorch CUDA serving recommendation, ONNX Runtime CUDA alternative, BentoML example paths, local fixed 2x/Nx video inference behavior, optional Practical-RIFE first-triplet quality evaluation, backend boundaries, and backend/service developer next steps.
 - `stage2_5_inference_runtime_stabilization.md` — Stage 2.5 final accepted status and handoff notes for accepted ONNX artifacts, real-image equivalence, batch/video inference, video-pipeline benchmarks including Practical-RIFE quality-evaluation timing, serving recommendations, and known limitations.
 
 ## `tests/`
@@ -344,7 +344,7 @@ Focused behavior tests.
 
 - `test_contracts.py` — compact artifact contract and relative path validation tests.
 - `test_serving.py` — Practical-RIFE serving facade validation, fake-video serving smoke tests, persistent runner checks, and BentoML example import/default checks.
-- `test_video_quality.py` — sampled Practical-RIFE video quality-evaluation config, sampling, scene-cut filtering, triplet writing, and metric aggregation tests.
+- `test_video_quality.py` — Practical-RIFE video quality-evaluation config, first-triplet decoding, quality-only resizing, opt-in triplet writing, single-scene assumption, and metric aggregation tests.
 - `test_amt_adapter.py` — AMT adapter prediction and shared config parsing tests.
 - `test_datasets_metrics_baselines.py` — triplet dataset loading, metric sanity, and baseline evaluation smoke tests.
 - `test_ema_adapter.py` — EMA-VFI runtime request/result behavior, PyTorch model-batch ordering/chunking, adapter wrapper compatibility, training-path isolation, and checkpoint normalization tests.

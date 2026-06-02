@@ -13,8 +13,8 @@ class VideoQualityEvaluationConfig:
     enabled: bool = False
     triplet_output_dir: Path | None = None
     sample_count: int = 16
-    random_seed: int | None = None
-    scene_cut_ssim_threshold: float | None = 0.75
+    max_image_side: int | None = 360
+    write_triplets: bool = False
     fail_policy: VideoQualityFailPolicy = "raise"
     source_video_id: str | None = None
 
@@ -23,13 +23,15 @@ class VideoQualityEvaluationConfig:
             raise ValueError("quality evaluation enabled must be a boolean")
         if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 0:
             raise ValueError("quality evaluation sample_count must be a non-negative integer")
-        if self.random_seed is not None and (isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int)):
-            raise ValueError("quality evaluation random_seed must be an integer when set")
-        if self.scene_cut_ssim_threshold is not None:
-            threshold = float(self.scene_cut_ssim_threshold)
-            if not 0.0 <= threshold <= 1.0:
-                raise ValueError("quality evaluation scene_cut_ssim_threshold must be in [0, 1]")
-            object.__setattr__(self, "scene_cut_ssim_threshold", threshold)
+        if self.max_image_side is not None:
+            if (
+                isinstance(self.max_image_side, bool)
+                or not isinstance(self.max_image_side, int)
+                or self.max_image_side <= 0
+            ):
+                raise ValueError("quality evaluation max_image_side must be a positive integer or None")
+        if not isinstance(self.write_triplets, bool):
+            raise ValueError("quality evaluation write_triplets must be a boolean")
         if self.fail_policy not in ("raise", "warn"):
             raise ValueError("quality evaluation fail_policy must be 'raise' or 'warn'")
         if self.triplet_output_dir is not None:

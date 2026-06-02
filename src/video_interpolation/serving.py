@@ -62,7 +62,8 @@ class PracticalRIFEServingConfig:
     mlflow_enabled: bool = False
     quality_evaluation_enabled: bool = True
     quality_sample_count: int = 16
-    quality_scene_cut_ssim_threshold: float | None = 0.75
+    quality_max_image_side: int | None = 360
+    quality_write_triplets: bool = False
 
     def __post_init__(self) -> None:
         backend = _coerce_backend(self.backend)
@@ -93,11 +94,15 @@ class PracticalRIFEServingConfig:
             or self.quality_sample_count < 0
         ):
             raise ValueError("quality_sample_count must be a non-negative integer.")
-        if self.quality_scene_cut_ssim_threshold is not None:
-            threshold = float(self.quality_scene_cut_ssim_threshold)
-            if not 0.0 <= threshold <= 1.0:
-                raise ValueError("quality_scene_cut_ssim_threshold must be in [0, 1].")
-            object.__setattr__(self, "quality_scene_cut_ssim_threshold", threshold)
+        if self.quality_max_image_side is not None:
+            if (
+                isinstance(self.quality_max_image_side, bool)
+                or not isinstance(self.quality_max_image_side, int)
+                or self.quality_max_image_side <= 0
+            ):
+                raise ValueError("quality_max_image_side must be a positive integer or None.")
+        if not isinstance(self.quality_write_triplets, bool):
+            raise ValueError("quality_write_triplets must be a boolean.")
         if self.onnx_path is not None:
             object.__setattr__(self, "onnx_path", Path(self.onnx_path))
         validate_rife_scale(self.default_scale)
@@ -166,6 +171,7 @@ class PracticalRIFEVideoInferenceRunner:
         encoder_options: Mapping[str, Any] | None = None,
         enable_quality_evaluation: bool | None = None,
         quality_triplet_output_dir: str | PathLike[str] | None = None,
+        write_quality_triplets: bool | None = None,
     ) -> VideoInferenceResult:
         factor, resolved_scale = self.config.validate_request(
             interpolation_factor=interpolation_factor,
@@ -186,6 +192,7 @@ class PracticalRIFEVideoInferenceRunner:
         self.load()
         model_config = self._video_model_config(resolved_scale)
         quality_enabled = self.config.quality_evaluation_enabled if enable_quality_evaluation is None else enable_quality_evaluation
+        quality_write_triplets = self.config.quality_write_triplets if write_quality_triplets is None else write_quality_triplets
         inference_config = VideoInferenceConfig(
             input_path=resolved_input,
             output_path=resolved_output,
@@ -205,7 +212,8 @@ class PracticalRIFEVideoInferenceRunner:
                 enabled=quality_enabled,
                 triplet_output_dir=resolved_quality_dir,
                 sample_count=self.config.quality_sample_count,
-                scene_cut_ssim_threshold=self.config.quality_scene_cut_ssim_threshold,
+                max_image_side=self.config.quality_max_image_side,
+                write_triplets=quality_write_triplets,
                 fail_policy="warn",
             ),
             mlflow=MlflowRunConfig(enabled=self.config.mlflow_enabled),
@@ -330,6 +338,7 @@ def run_practical_rife_video_inference(
     codec: str = DEFAULT_SERVING_CODEC,
     enable_quality_evaluation: bool = True,
     quality_triplet_output_dir: str | PathLike[str] | None = None,
+    write_quality_triplets: bool = False,
     settings: Settings | None = None,
 ) -> VideoInferenceResult:
     config = PracticalRIFEServingConfig(
@@ -353,6 +362,7 @@ def run_practical_rife_video_inference(
             codec=codec,
             enable_quality_evaluation=enable_quality_evaluation,
             quality_triplet_output_dir=quality_triplet_output_dir,
+            write_quality_triplets=write_quality_triplets,
         )
     finally:
         runner.close()

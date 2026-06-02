@@ -483,9 +483,8 @@ def benchmark_params(
         "log_output_videos": config.log_output_videos,
         "quality_evaluation_enabled": bool(config.quality_evaluation and config.quality_evaluation.enabled),
         "quality_sample_count": config.quality_evaluation.sample_count if config.quality_evaluation else None,
-        "quality_scene_cut_ssim_threshold": config.quality_evaluation.scene_cut_ssim_threshold
-        if config.quality_evaluation
-        else None,
+        "quality_max_image_side": config.quality_evaluation.max_image_side if config.quality_evaluation else None,
+        "quality_write_triplets": config.quality_evaluation.write_triplets if config.quality_evaluation else None,
         "quality_fail_policy": config.quality_evaluation.fail_policy if config.quality_evaluation else None,
     }
 
