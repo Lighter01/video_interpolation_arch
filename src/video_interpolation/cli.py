@@ -85,6 +85,7 @@ from .inference import (
     with_inference_limit,
     with_inference_mlflow_disabled,
     with_inference_output,
+    with_inference_quality_evaluation,
     with_inference_runtime_option,
 )
 from .inference_benchmark import (
@@ -131,6 +132,7 @@ from .inference_runtime.rife import validate_rife_scale
 from .mlflow import MlflowLoggingError, MlflowRunConfig, MlflowSmokeResult, run_mlflow_smoke
 from .rife_preflight import run_practical_rife_preflight
 from .settings import load_settings
+from .video_quality import VideoQualityEvaluationConfig
 from .training import (
     EMATrainingConfig,
     EMATrainingResult,
@@ -2048,6 +2050,39 @@ def rife_infer_video(
         "--codec",
         help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
     ),
+    enable_quality_evaluation: bool = typer.Option(
+        False,
+        "--enable-quality-evaluation",
+        help="Sample source triplets and compute Practical-RIFE PSNR/SSIM after video inference.",
+    ),
+    quality_triplet_output_dir: Path | None = typer.Option(
+        None,
+        "--quality-triplet-output-dir",
+        help="Directory for sampled Vimeo-style quality triplets. Defaults next to the output video.",
+    ),
+    quality_sample_count: int = typer.Option(
+        16,
+        "--quality-sample-count",
+        min=0,
+        help="Maximum sampled source triplets for quality evaluation.",
+    ),
+    quality_random_seed: int | None = typer.Option(
+        None,
+        "--quality-random-seed",
+        help="Optional deterministic quality sampling seed.",
+    ),
+    quality_scene_cut_ssim_threshold: float | None = typer.Option(
+        0.75,
+        "--quality-scene-cut-ssim-threshold",
+        min=0.0,
+        max=1.0,
+        help="Reject sampled triplets with adjacent-frame SSIM below this value.",
+    ),
+    quality_fail_policy: str = typer.Option(
+        "raise",
+        "--quality-fail-policy",
+        help="Quality evaluation failure policy: raise or warn.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -2080,6 +2115,17 @@ def rife_infer_video(
     )
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_quality_evaluation(
+        inference_config,
+        VideoQualityEvaluationConfig(
+            enabled=enable_quality_evaluation,
+            triplet_output_dir=quality_triplet_output_dir,
+            sample_count=quality_sample_count,
+            random_seed=quality_random_seed,
+            scene_cut_ssim_threshold=quality_scene_cut_ssim_threshold,
+            fail_policy=quality_fail_policy,
+        ),
+    )
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     console.print(
         "[bold]Running Practical-RIFE video inference:[/bold] "
@@ -2750,6 +2796,11 @@ def benchmark_runtime(
         "--log-output-videos/--no-log-output-videos",
         help="Include generated benchmark videos as MLflow artifacts.",
     ),
+    disable_quality_evaluation: bool = typer.Option(
+        False,
+        "--disable-quality-evaluation",
+        help="Disable Practical-RIFE sampled quality evaluation during benchmark runs.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -2783,6 +2834,7 @@ def benchmark_runtime(
             codec=codec,
             output_dir=output_dir,
             log_output_videos=log_output_videos,
+            quality_evaluation=VideoQualityEvaluationConfig(enabled=False) if disable_quality_evaluation else None,
             mlflow=MlflowRunConfig(
                 enabled=not disable_mlflow,
                 experiment_name=experiment_name,
@@ -3119,6 +3171,8 @@ def _print_video_benchmark_summary(result: VideoBenchmarkResult) -> None:
         "pairs": sum(record.pairs_processed for record in result.records if record.status == "ok"),
         "generated": sum(record.generated_frames for record in result.records if record.status == "ok"),
         "model_sec": sum(record.model_inference_sec for record in result.records if record.status == "ok"),
+        "quality_sec": sum(record.quality_evaluation_sec for record in result.records if record.status == "ok"),
+        "quality_triplets": sum(record.quality_triplets_written for record in result.records if record.status == "ok"),
         "total_sec": sum(record.total_sec for record in result.records if record.status == "ok"),
     }
     table = Table(title="Runtime Video Benchmark Summary")
@@ -3132,6 +3186,8 @@ def _print_video_benchmark_summary(result: VideoBenchmarkResult) -> None:
     table.add_row("pairs", str(metrics["pairs"]))
     table.add_row("generated frames", str(metrics["generated"]))
     table.add_row("model inference sec", f"{metrics['model_sec']:.6f}")
+    table.add_row("quality evaluation sec", f"{metrics['quality_sec']:.6f}")
+    table.add_row("quality triplets", str(metrics["quality_triplets"]))
     table.add_row("total sec", f"{metrics['total_sec']:.6f}")
     table.add_row("report", str(result.artifacts.report_path))
     table.add_row("csv", str(result.artifacts.csv_path))

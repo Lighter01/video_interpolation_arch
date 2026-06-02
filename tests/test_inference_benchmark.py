@@ -33,10 +33,15 @@ from video_interpolation.settings import Settings
 
 def test_video_benchmark_config_defaults_to_video_input_and_validates_arguments() -> None:
     config = VideoBenchmarkConfig(model_name="ema_vfi_small", backend="onnx", execution_mode="batched")
+    rife_config = VideoBenchmarkConfig(model_name="practical_rife_v4_26", backend="torch")
 
     assert config.input_path == DEFAULT_VIDEO_BENCHMARK_INPUT
     assert config.backend is RuntimeBackendKind.ONNX
     assert config.execution_mode is BenchmarkExecutionMode.BATCHED
+    assert config.quality_evaluation is not None
+    assert not config.quality_evaluation.enabled
+    assert rife_config.quality_evaluation is not None
+    assert rife_config.quality_evaluation.enabled
 
     with pytest.raises(ValueError, match="Unsupported benchmark model"):
         VideoBenchmarkConfig(model_name="amt_s")
@@ -136,6 +141,8 @@ def test_run_video_benchmark_sequential_records_pipeline_timings(tmp_path: Path)
     assert record.postprocessing_sec >= 0
     assert record.encode_sec >= 0
     assert record.audio_remux_sec >= 0
+    assert not record.quality_evaluation_enabled
+    assert record.quality_evaluation_sec == 0
     assert record.total_sec >= record.model_inference_sec
     assert record.output_video is not None
     assert record.output_video.is_file()
@@ -238,6 +245,7 @@ def test_write_video_benchmark_report_writes_json_and_csv(tmp_path: Path) -> Non
     assert "model_name,backend,execution_mode" in csv_text
     assert "decode_sec" in csv_text
     assert "audio_remux_sec" in csv_text
+    assert "quality_evaluation_sec" in csv_text
 
 
 def test_benchmark_profile_slug_includes_video_runtime_profile() -> None:
@@ -259,7 +267,8 @@ def test_benchmark_profile_slug_includes_video_runtime_profile() -> None:
 class _RuntimeAdapter(ModelAdapter):
     model_name = "runtime_adapter"
 
-    def __init__(self) -> None:
+    def __init__(self, model_name: str = "runtime_adapter") -> None:
+        self.model_name = model_name
         self.requests: list[FramePairRequest] = []
         self.batch_requests: list[ModelBatchRequest] = []
         self.closed = False
@@ -328,7 +337,7 @@ class _RuntimeAdapter(ModelAdapter):
 def _adapter_factory(adapters: list[_RuntimeAdapter]):
     def benchmark_factory(_config: VideoBenchmarkConfig, _settings: Settings):
         def factory(_model_config, _run_settings: Settings) -> ModelAdapter:
-            adapter = _RuntimeAdapter()
+            adapter = _RuntimeAdapter(model_name=_config.model_name)
             adapters.append(adapter)
             return adapter
 
@@ -406,6 +415,13 @@ def _record(
         postprocessing_sec=0.03,
         encode_sec=0.04,
         audio_remux_sec=0.01,
+        quality_evaluation_enabled=False,
+        quality_evaluation_sec=0.0,
+        quality_psnr_mean=None,
+        quality_ssim_mean=None,
+        quality_triplets_written=0,
+        quality_triplet_output_dir=None,
+        quality_error=None,
         total_sec=total_sec,
         model_pairs_per_sec=pairs_processed / model_inference_sec,
         total_pairs_per_sec=pairs_processed / total_sec,

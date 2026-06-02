@@ -27,6 +27,11 @@ from video_interpolation.inference_runtime import (
 from video_interpolation.inference_runtime.rife import validate_rife_scale
 from video_interpolation.mlflow import MlflowRunConfig, log_stage1_run
 from video_interpolation.settings import Settings, load_settings
+from video_interpolation.video_quality import (
+    VideoQualityEvaluationConfig,
+    VideoQualityEvaluationResult,
+    evaluate_video_quality,
+)
 
 ProgressCallback = Callable[[str, Mapping[str, object]], None]
 AdapterFactory = Callable[[Any, Settings], ModelAdapter]
@@ -64,6 +69,7 @@ class VideoInferenceConfig:
     frame_format: str = "rgb24"
     encoder_options: Mapping[str, Any] = field(default_factory=dict)
     encoder_options_by_codec: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    quality_evaluation: VideoQualityEvaluationConfig = field(default_factory=VideoQualityEvaluationConfig)
     mlflow: MlflowRunConfig = field(default_factory=lambda: MlflowRunConfig(experiment_name="stage1-ema-inference"))
     config_path: Path | None = None
 
@@ -78,6 +84,7 @@ class VideoInferenceConfig:
         values["output_path"] = Path(values["output_path"])
         values["model"] = model_config_factory(values.get("model"))
         values["runtime_options"] = dict(values.get("runtime_options") or {})
+        values["quality_evaluation"] = _quality_config_from_mapping(values.get("quality_evaluation"))
         values["mlflow"] = MlflowRunConfig.from_mapping(values.get("mlflow"))
         if values.get("config_path") is not None:
             values["config_path"] = Path(values["config_path"])
@@ -103,6 +110,8 @@ class VideoInferenceConfig:
         if self.frame_format not in SUPPORTED_FRAME_FORMATS:
             allowed = ", ".join(sorted(SUPPORTED_FRAME_FORMATS))
             raise ValueError(f"frame_format must be one of: {allowed}")
+        if not isinstance(self.quality_evaluation, VideoQualityEvaluationConfig):
+            raise ValueError("quality_evaluation must be a VideoQualityEvaluationConfig")
 
     def resolved_interpolation_mode(self) -> InferenceMode:
         try:
@@ -151,6 +160,7 @@ class VideoInferenceTiming:
     postprocessing_sec: float = 0.0
     encode_sec: float = 0.0
     audio_remux_sec: float = 0.0
+    quality_evaluation_sec: float = 0.0
     total_sec: float = 0.0
 
 
@@ -185,6 +195,11 @@ class VideoInferenceResult:
     audio_streams_preserved: int
     mlflow_run_id: str | None
     timing: VideoInferenceTiming = field(default_factory=VideoInferenceTiming)
+    quality_psnr_mean: float | None = None
+    quality_ssim_mean: float | None = None
+    quality_triplets_written: int = 0
+    quality_triplet_output_dir: Path | None = None
+    quality_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -257,6 +272,7 @@ def run_video_inference(
     settings = settings or load_settings()
     input_path = _resolve_project_path(settings, config.input_path)
     output_path = _resolve_project_path(settings, config.output_path)
+    quality_config = _resolve_quality_evaluation_config(settings, config.quality_evaluation)
     if not input_path.is_file():
         raise FileNotFoundError(f"Input video does not exist: {input_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,6 +309,8 @@ def run_video_inference(
     postprocessing_sec = 0.0
     encode_sec = 0.0
     audio_remux_sec = 0.0
+    quality_evaluation_sec = 0.0
+    quality_result = VideoQualityEvaluationResult()
     runtime_backend = "adapter"
     execution_mode = requested_execution_mode.value
     batch_chunks_processed = 0
@@ -414,6 +432,17 @@ def run_video_inference(
             max_duration_sec=_audio_duration_limit(config, frames_written, output_fps),
         )
         audio_remux_sec = perf_counter() - audio_remux_start
+        if quality_config.enabled:
+            quality_start = perf_counter()
+            quality_result = _run_quality_evaluation(
+                quality_config,
+                input_path=input_path,
+                output_path=output_path,
+                adapter=model_adapter,
+                mode=interpolation_mode,
+                runtime_options=runtime_options,
+            )
+            quality_evaluation_sec = perf_counter() - quality_start
     finally:
         capture.release()
         if output_container is not None:
@@ -431,6 +460,7 @@ def run_video_inference(
         postprocessing_sec=postprocessing_sec,
         encode_sec=encode_sec,
         audio_remux_sec=audio_remux_sec,
+        quality_evaluation_sec=quality_evaluation_sec,
         total_sec=total_elapsed_sec,
     )
     model_pairs_per_sec = _safe_rate(pairs_processed, model_inference_elapsed_sec)
@@ -439,6 +469,8 @@ def run_video_inference(
     artifact_paths = [output_path]
     if config.config_path is not None:
         artifact_paths.append(_resolve_project_path(settings, config.config_path))
+    if quality_result.triplet_output_dir is not None and quality_result.triplet_output_dir.exists():
+        artifact_paths.append(quality_result.triplet_output_dir)
 
     mlflow_run_id = log_stage1_run(
         config.mlflow,
@@ -469,6 +501,13 @@ def run_video_inference(
             "encoder_options": encoder_options,
             "audio_streams_available": audio_streams_available,
             "audio_streams_preserved": audio_streams_preserved,
+            "quality_evaluation_enabled": quality_config.enabled,
+            "quality_sample_count": quality_config.sample_count,
+            "quality_scene_cut_ssim_threshold": quality_config.scene_cut_ssim_threshold,
+            "quality_fail_policy": quality_config.fail_policy,
+            "quality_triplet_output_dir": str(quality_result.triplet_output_dir)
+            if quality_result.triplet_output_dir is not None
+            else None,
         },
         metrics={
             "inference.pairs_processed": float(pairs_processed),
@@ -487,9 +526,11 @@ def run_video_inference(
             "inference.postprocessing_sec": timing.postprocessing_sec,
             "inference.encode_sec": timing.encode_sec,
             "inference.audio_remux_sec": timing.audio_remux_sec,
+            "inference.quality_evaluation_sec": timing.quality_evaluation_sec,
             "inference.total_elapsed_sec": total_elapsed_sec,
             "inference.model_pairs_per_sec": model_pairs_per_sec,
             "inference.total_pairs_per_sec": total_pairs_per_sec,
+            **_quality_mlflow_metrics(quality_result),
         },
         artifact_paths=artifact_paths,
         settings=settings,
@@ -525,6 +566,11 @@ def run_video_inference(
         audio_streams_preserved=audio_streams_preserved,
         mlflow_run_id=mlflow_run_id,
         timing=timing,
+        quality_psnr_mean=quality_result.psnr_mean,
+        quality_ssim_mean=quality_result.ssim_mean,
+        quality_triplets_written=quality_result.triplets_written,
+        quality_triplet_output_dir=quality_result.triplet_output_dir,
+        quality_error=quality_result.error,
     )
 
 
@@ -635,6 +681,13 @@ def with_inference_mlflow_disabled(
     if not disabled:
         return config
     return replace(config, mlflow=replace(config.mlflow, enabled=False))
+
+
+def with_inference_quality_evaluation(
+    config: VideoInferenceConfig,
+    quality_evaluation: VideoQualityEvaluationConfig,
+) -> VideoInferenceConfig:
+    return replace(config, quality_evaluation=quality_evaluation)
 
 
 def resolve_encoder_options(
@@ -1216,6 +1269,65 @@ def _resolve_project_path(settings: Settings, path: Path) -> Path:
     if path.is_absolute():
         return path
     return settings.resolve_path(path)
+
+
+def _quality_config_from_mapping(data: Any) -> VideoQualityEvaluationConfig:
+    if isinstance(data, VideoQualityEvaluationConfig):
+        return data
+    if data is None:
+        return VideoQualityEvaluationConfig()
+    if not isinstance(data, Mapping):
+        raise ValueError("quality_evaluation config must be a mapping when provided")
+    values = dict(data)
+    if values.get("triplet_output_dir") is not None:
+        values["triplet_output_dir"] = Path(values["triplet_output_dir"])
+    return VideoQualityEvaluationConfig(**values)
+
+
+def _resolve_quality_evaluation_config(
+    settings: Settings,
+    config: VideoQualityEvaluationConfig,
+) -> VideoQualityEvaluationConfig:
+    if config.triplet_output_dir is None or config.triplet_output_dir.is_absolute():
+        return config
+    return replace(config, triplet_output_dir=settings.resolve_path(config.triplet_output_dir))
+
+
+def _run_quality_evaluation(
+    config: VideoQualityEvaluationConfig,
+    *,
+    input_path: Path,
+    output_path: Path,
+    adapter: ModelAdapter,
+    mode: InferenceMode,
+    runtime_options: Mapping[str, object],
+) -> VideoQualityEvaluationResult:
+    if not config.enabled:
+        return VideoQualityEvaluationResult()
+    try:
+        return evaluate_video_quality(
+            input_path=input_path,
+            output_path=output_path,
+            adapter=adapter,
+            mode=mode,
+            runtime_options=runtime_options,
+            config=config,
+        )
+    except Exception as exc:
+        if config.fail_policy == "warn":
+            return VideoQualityEvaluationResult(error=str(exc))
+        raise
+
+
+def _quality_mlflow_metrics(result: VideoQualityEvaluationResult) -> dict[str, float]:
+    metrics = {
+        "inference.quality_triplets_written": float(result.triplets_written),
+    }
+    if result.psnr_mean is not None and math.isfinite(result.psnr_mean):
+        metrics["inference.quality_psnr_mean"] = float(result.psnr_mean)
+    if result.ssim_mean is not None and math.isfinite(result.ssim_mean):
+        metrics["inference.quality_ssim_mean"] = float(result.ssim_mean)
+    return metrics
 
 
 def _model_config_value(model_config: Any, name: str, *, default: Any = "") -> Any:

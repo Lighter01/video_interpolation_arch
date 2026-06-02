@@ -41,6 +41,9 @@ def test_practical_rife_serving_config_defaults_to_torch_cuda_sequential_nx() ->
     assert config.min_interpolation_factor == MIN_SERVING_INTERPOLATION_FACTOR
     assert config.max_interpolation_factor == MAX_SERVING_INTERPOLATION_FACTOR
     assert config.default_scale == 1.0
+    assert config.quality_evaluation_enabled
+    assert config.quality_sample_count == 16
+    assert config.quality_scene_cut_ssim_threshold == 0.75
 
 
 @pytest.mark.parametrize("factor", [2, 3, 4])

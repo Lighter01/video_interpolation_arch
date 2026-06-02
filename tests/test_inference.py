@@ -28,6 +28,7 @@ from video_interpolation.inference_runtime import FramePairRequest, FramePairRes
 from video_interpolation.inference_runtime.api import ModelBatchRequest, ModelBatchResult
 from video_interpolation.mlflow import MlflowRunConfig
 from video_interpolation.settings import Settings
+from video_interpolation.video_quality import VideoQualityEvaluationConfig
 
 
 def test_video_inference_config_parses_pyav_output_fields() -> None:
@@ -357,6 +358,84 @@ def test_video_inference_passes_runtime_options_to_request_and_result(tmp_path) 
 
     assert dict(result.runtime_options) == {"scale": 0.5}
     assert adapter.requests[0].backend_options["scale"] == 0.5
+
+
+def test_video_inference_quality_evaluation_uses_main_mode_with_factor_two(tmp_path) -> None:
+    input_path = tmp_path / "quality_input.mp4"
+    output_path = tmp_path / "quality_output.mp4"
+    triplet_root = tmp_path / "quality_triplets"
+    _write_synthetic_input_video(input_path, frame_values=(0, 96, 192))
+    adapter = _PracticalRuntimeAdapter()
+
+    result = run_video_inference(
+        VideoInferenceConfig(
+            input_path=input_path,
+            output_path=output_path,
+            model=_runtime_model_config("practical_rife_v4_26"),
+            interpolation_mode=InferenceMode.ARBITRARY_NX,
+            interpolation_factor=4,
+            runtime_options={"scale": 0.5},
+            quality_evaluation=VideoQualityEvaluationConfig(
+                enabled=True,
+                triplet_output_dir=triplet_root,
+                sample_count=1,
+                random_seed=0,
+                scene_cut_ssim_threshold=None,
+                source_video_id="source123",
+            ),
+            codec="libx264",
+            encoder_options={"crf": "28"},
+            limit_pairs=1,
+            mlflow=MlflowRunConfig(enabled=False),
+        ),
+        adapter_factory=lambda _model_config, _settings: adapter,
+        settings=Settings(),
+        adapter=adapter,
+    )
+
+    assert result.quality_triplets_written == 1
+    assert result.quality_psnr_mean is not None
+    assert result.quality_ssim_mean is not None
+    assert result.quality_triplet_output_dir == triplet_root / "source123"
+    assert result.timing.quality_evaluation_sec >= 0
+    assert (triplet_root / "source123" / "000000" / "im2.png").is_file()
+    assert [request.interpolation_factor for request in adapter.requests] == [4, 2]
+    assert adapter.requests[-1].mode is InferenceMode.ARBITRARY_NX
+    assert adapter.requests[-1].backend_options["scale"] == 0.5
+
+
+def test_video_inference_quality_warn_policy_preserves_video_result(tmp_path) -> None:
+    input_path = tmp_path / "quality_warn_input.mp4"
+    output_path = tmp_path / "quality_warn_output.mp4"
+    _write_synthetic_input_video(input_path, frame_values=(0, 96, 192))
+    adapter = _FailingQualityAdapter()
+
+    result = run_video_inference(
+        VideoInferenceConfig(
+            input_path=input_path,
+            output_path=output_path,
+            model=_runtime_model_config("practical_rife_v4_26"),
+            interpolation_mode=InferenceMode.FIXED_2X,
+            interpolation_factor=2,
+            quality_evaluation=VideoQualityEvaluationConfig(
+                enabled=True,
+                sample_count=1,
+                scene_cut_ssim_threshold=None,
+                fail_policy="warn",
+            ),
+            codec="libx264",
+            encoder_options={"crf": "28"},
+            limit_pairs=1,
+            mlflow=MlflowRunConfig(enabled=False),
+        ),
+        adapter_factory=lambda _model_config, _settings: adapter,
+        settings=Settings(),
+        adapter=adapter,
+    )
+
+    assert result.frames_written == 3
+    assert result.quality_error is not None
+    assert "quality failure" in result.quality_error
 
 
 def test_video_batched_inference_passes_batch_size_to_model_request(tmp_path) -> None:
@@ -778,6 +857,22 @@ class _RuntimeAdapter(ModelAdapter):
         )
 
 
+class _PracticalRuntimeAdapter(_RuntimeAdapter):
+    model_name = "practical_rife_v4_26"
+
+
+class _FailingQualityAdapter(_PracticalRuntimeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._calls = 0
+
+    def predict_frame_pair(self, request: FramePairRequest) -> FramePairResult:
+        self._calls += 1
+        if self._calls > 1:
+            raise RuntimeError("quality failure")
+        return super().predict_frame_pair(request)
+
+
 class _BatchRuntimeAdapter(_RuntimeAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -818,9 +913,9 @@ class _BatchRuntimeAdapter(_RuntimeAdapter):
         )
 
 
-def _runtime_model_config() -> dict[str, object]:
+def _runtime_model_config(model_name: str = "runtime_adapter") -> dict[str, object]:
     return {
-        "model_name": "runtime_adapter",
+        "model_name": model_name,
         "checkpoint_path": "",
         "supported_modes": ("fixed_2x", "arbitrary_nx"),
         "default_interpolation_factor": 2,

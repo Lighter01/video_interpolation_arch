@@ -344,6 +344,25 @@ def read_video_metadata(
     )
 
 
+def decode_selected_video_frames(
+    video_path: Path,
+    frame_indices: Sequence[int],
+    *,
+    resize: ResizeSpec | None = None,
+    fps: float | None = None,
+    strategy: str = "auto",
+) -> DecodeResult:
+    """Decode specific zero-based video frames for shared preprocessing/inference helpers."""
+    resolved_fps = read_video_metadata(video_path).fps if fps is None else fps
+    return _decode_selected_frames(
+        video_path,
+        frame_indices,
+        resize,
+        fps=resolved_fps,
+        strategy=strategy,
+    )
+
+
 def detect_scene_spans(
     video_path: Path,
     frame_count: int,

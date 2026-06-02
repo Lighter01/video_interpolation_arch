@@ -44,6 +44,7 @@ from video_interpolation.inference_runtime.onnx_validation import resolve_prefer
 from video_interpolation.inference_runtime.rife import validate_rife_scale
 from video_interpolation.mlflow import MlflowRunConfig, log_benchmark_run
 from video_interpolation.settings import Settings, load_settings
+from video_interpolation.video_quality import VideoQualityEvaluationConfig
 
 
 class BenchmarkExecutionMode(StrEnum):
@@ -82,6 +83,7 @@ class VideoBenchmarkConfig:
     encoder_options: Mapping[str, Any] = field(default_factory=dict)
     output_dir: Path = DEFAULT_VIDEO_BENCHMARK_OUTPUT_DIR
     log_output_videos: bool = False
+    quality_evaluation: VideoQualityEvaluationConfig | None = None
     mlflow: MlflowRunConfig = field(
         default_factory=lambda: MlflowRunConfig(
             experiment_name="stage2-5-inference-benchmarks",
@@ -125,6 +127,14 @@ class VideoBenchmarkConfig:
         providers = (self.providers,) if isinstance(self.providers, str) else tuple(self.providers)
         object.__setattr__(self, "providers", tuple(str(provider) for provider in providers))
         object.__setattr__(self, "encoder_options", dict(self.encoder_options))
+        if self.quality_evaluation is None:
+            object.__setattr__(
+                self,
+                "quality_evaluation",
+                VideoQualityEvaluationConfig(enabled=self.model_name.startswith("practical_rife")),
+            )
+        elif not isinstance(self.quality_evaluation, VideoQualityEvaluationConfig):
+            raise ValueError("quality_evaluation must be a VideoQualityEvaluationConfig when set")
 
     @property
     def timesteps(self) -> tuple[float, ...]:
@@ -164,6 +174,13 @@ class VideoBenchmarkRecord:
     postprocessing_sec: float
     encode_sec: float
     audio_remux_sec: float
+    quality_evaluation_enabled: bool
+    quality_evaluation_sec: float
+    quality_psnr_mean: float | None
+    quality_ssim_mean: float | None
+    quality_triplets_written: int
+    quality_triplet_output_dir: Path | None
+    quality_error: str | None
     total_sec: float
     model_pairs_per_sec: float
     total_pairs_per_sec: float
@@ -204,6 +221,13 @@ class VideoBenchmarkRecord:
             "postprocessing_sec": _format_float(self.postprocessing_sec),
             "encode_sec": _format_float(self.encode_sec),
             "audio_remux_sec": _format_float(self.audio_remux_sec),
+            "quality_evaluation_enabled": self.quality_evaluation_enabled,
+            "quality_evaluation_sec": _format_float(self.quality_evaluation_sec),
+            "quality_psnr_mean": _format_optional_float(self.quality_psnr_mean),
+            "quality_ssim_mean": _format_optional_float(self.quality_ssim_mean),
+            "quality_triplets_written": self.quality_triplets_written,
+            "quality_triplet_output_dir": str(self.quality_triplet_output_dir) if self.quality_triplet_output_dir else "",
+            "quality_error": self.quality_error or "",
             "total_sec": _format_float(self.total_sec),
             "model_pairs_per_sec": _format_float(self.model_pairs_per_sec),
             "total_pairs_per_sec": _format_float(self.total_pairs_per_sec),
@@ -409,6 +433,8 @@ def benchmark_metrics(records: Sequence[VideoBenchmarkRecord]) -> dict[str, floa
         "benchmark.postprocessing_sec": sum(record.postprocessing_sec for record in successful),
         "benchmark.encode_sec": sum(record.encode_sec for record in successful),
         "benchmark.audio_remux_sec": sum(record.audio_remux_sec for record in successful),
+        "benchmark.quality_evaluation_sec": sum(record.quality_evaluation_sec for record in successful),
+        "benchmark.quality_triplets_written": float(sum(record.quality_triplets_written for record in successful)),
         "benchmark.total_sec": total_sec,
         "benchmark.model_pairs_per_sec": _safe_rate(total_pairs, total_model_sec),
         "benchmark.total_pairs_per_sec": _safe_rate(total_pairs, total_sec),
@@ -420,6 +446,12 @@ def benchmark_metrics(records: Sequence[VideoBenchmarkRecord]) -> dict[str, floa
     peak_values = [record.peak_vram_mb for record in successful if record.peak_vram_mb is not None]
     if peak_values:
         metrics["benchmark.peak_vram_mb"] = max(peak_values)
+    psnr_values = [record.quality_psnr_mean for record in successful if record.quality_psnr_mean is not None]
+    if psnr_values:
+        metrics["benchmark.quality_psnr_mean"] = float(sum(psnr_values) / len(psnr_values))
+    ssim_values = [record.quality_ssim_mean for record in successful if record.quality_ssim_mean is not None]
+    if ssim_values:
+        metrics["benchmark.quality_ssim_mean"] = float(sum(ssim_values) / len(ssim_values))
     return metrics
 
 
@@ -449,6 +481,12 @@ def benchmark_params(
         "pix_fmt": config.pix_fmt,
         "frame_format": config.frame_format,
         "log_output_videos": config.log_output_videos,
+        "quality_evaluation_enabled": bool(config.quality_evaluation and config.quality_evaluation.enabled),
+        "quality_sample_count": config.quality_evaluation.sample_count if config.quality_evaluation else None,
+        "quality_scene_cut_ssim_threshold": config.quality_evaluation.scene_cut_ssim_threshold
+        if config.quality_evaluation
+        else None,
+        "quality_fail_policy": config.quality_evaluation.fail_policy if config.quality_evaluation else None,
     }
 
 
@@ -588,6 +626,7 @@ def _video_inference_config(
         pix_fmt=config.pix_fmt,
         frame_format=config.frame_format,
         encoder_options=config.encoder_options,
+        quality_evaluation=config.quality_evaluation or VideoQualityEvaluationConfig(),
         mlflow=replace(config.mlflow, enabled=False),
     )
 
@@ -631,6 +670,13 @@ def _record_from_result(
         postprocessing_sec=result.timing.postprocessing_sec,
         encode_sec=result.timing.encode_sec,
         audio_remux_sec=result.timing.audio_remux_sec,
+        quality_evaluation_enabled=bool(config.quality_evaluation and config.quality_evaluation.enabled),
+        quality_evaluation_sec=result.timing.quality_evaluation_sec,
+        quality_psnr_mean=result.quality_psnr_mean,
+        quality_ssim_mean=result.quality_ssim_mean,
+        quality_triplets_written=result.quality_triplets_written,
+        quality_triplet_output_dir=result.quality_triplet_output_dir,
+        quality_error=result.quality_error,
         total_sec=result.total_elapsed_sec,
         model_pairs_per_sec=result.model_pairs_per_sec,
         total_pairs_per_sec=result.total_pairs_per_sec,
@@ -681,6 +727,13 @@ def _failed_record(
         postprocessing_sec=0.0,
         encode_sec=0.0,
         audio_remux_sec=0.0,
+        quality_evaluation_enabled=bool(config.quality_evaluation and config.quality_evaluation.enabled),
+        quality_evaluation_sec=0.0,
+        quality_psnr_mean=None,
+        quality_ssim_mean=None,
+        quality_triplets_written=0,
+        quality_triplet_output_dir=None,
+        quality_error=None,
         total_sec=0.0,
         model_pairs_per_sec=0.0,
         total_pairs_per_sec=0.0,
@@ -829,6 +882,13 @@ def _empty_record_row() -> dict[str, object]:
         postprocessing_sec=0.0,
         encode_sec=0.0,
         audio_remux_sec=0.0,
+        quality_evaluation_enabled=False,
+        quality_evaluation_sec=0.0,
+        quality_psnr_mean=None,
+        quality_ssim_mean=None,
+        quality_triplets_written=0,
+        quality_triplet_output_dir=None,
+        quality_error=None,
         total_sec=0.0,
         model_pairs_per_sec=0.0,
         total_pairs_per_sec=0.0,
