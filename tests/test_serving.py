@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import importlib.util
 import inspect
 
@@ -151,6 +152,45 @@ def test_practical_rife_serving_runner_reuses_loaded_adapter_across_requests(tmp
     assert second.output_fps == pytest.approx(second.input_fps * 4)
     assert first.runtime_options["scale"] == 0.5
     assert second.runtime_options["scale"] == 0.5
+
+
+def test_practical_rife_serving_runner_passes_request_quality_sample_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "output.mp4"
+    input_path.write_bytes(b"input")
+    adapter = _ServingRuntimeAdapter()
+    captured: dict[str, object] = {}
+
+    def _fake_run_video_inference(config, **kwargs):
+        captured["config"] = config
+        captured["adapter"] = kwargs["adapter"]
+        return SimpleNamespace(output_path=config.output_path)
+
+    monkeypatch.setattr("video_interpolation.serving.run_video_inference", _fake_run_video_inference)
+    runner = PracticalRIFEVideoInferenceRunner(adapter=adapter, settings=Settings())
+
+    result = runner.run(
+        input_path=input_path,
+        output_path=output_path,
+        interpolation_factor=3,
+        scale=0.5,
+        output_playback_mode="slow_motion",
+        enable_quality_evaluation=False,
+        quality_sample_count=7,
+    )
+
+    config = captured["config"]
+    assert result.output_path == output_path
+    assert adapter.load_count == 1
+    assert captured["adapter"] is adapter
+    assert config.interpolation_factor == 3
+    assert config.runtime_options["scale"] == 0.5
+    assert config.output_playback_mode.value == "slow_motion"
+    assert not config.quality_evaluation.enabled
+    assert config.quality_evaluation.sample_count == 7
 
 
 def test_practical_rife_serving_convenience_function_uses_facade(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

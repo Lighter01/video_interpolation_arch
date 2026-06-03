@@ -16,6 +16,7 @@ Compact repository index for coding agents. This file describes the current proj
 - `model_exports/` — generated model export artifacts such as Stage 2 ONNX exports; artifacts are runtime/developer outputs, not source model code.
 - `model_weights/` — pretrained model weights and model-specific checkpoint artifacts.
 - `outputs/` — generated local reports, predictions, inference videos, and validation artifacts.
+- `services/` — service-facing integration code outside the installable package.
 - `src/` — local Python package for ML core workflows, inference runtime, local video inference, benchmarks, and serving-readiness facade.
 - `tests/` — focused tests for critical Stage 1 behavior plus Stage 2/2.5 inference runtime, ONNX, benchmark, and serving-readiness behavior.
 
@@ -45,6 +46,7 @@ Agent-facing documentation and development logs.
 - `01_ml_core_selected.execplan.md` — completed Stage 1 ML Core ExecPlan and handoff.
 - `02_inference_runtime_refactor.execplan.md` — completed Stage 2 ExecPlan covering the inference runtime refactor, Practical-RIFE v4.26 serving-readiness facade, BentoML examples, final serving recommendation, and backend/service handoff.
 - `02_5_inference_runtime_stabilization.execplan.md` — completed Stage 2.5 ExecPlan covering ONNX stabilization, real-image equivalence, true model batch inference, video-pipeline benchmarks, final serving recommendations, and accepted handoff back to Stage 2.
+- `03_practical_rife_bentoml_mvp.execplan.md` — completed Stage 3 MVP plan for a worker-compatible Practical-RIFE v4.26 PyTorch CUDA BentoML service under `services/practical_rife_bentoml/`.
 
 ## `.agent/stage_plans/`
 
@@ -60,6 +62,20 @@ Minimal BentoML compatibility examples for Practical-RIFE v4.26 serving.
 
 - `practical_rife_torch_service/service.py` — recommended/default Practical-RIFE PyTorch service example using `backend="torch"`, `device="cuda"`, sequential arbitrary-Nx video inference, runtime factor `2..4`, runtime scale, and output playback mode.
 - `practical_rife_onnx_service/service.py` — alternate Practical-RIFE ONNX Runtime service example using `backend="onnx"`, `CUDAExecutionProvider`, the same sequential serving facade, output playback mode, and scale matching the loaded ONNX artifact.
+
+## `services/`
+
+Service-facing integration code outside the installable package.
+
+### `services/practical_rife_bentoml/`
+
+MVP BentoML service for the external `pirsii_interpolator` worker contract.
+
+- `service.py` — Practical-RIFE v4.26 PyTorch service contract with `POST /interpolate_video`, strict path/request validation, env-driven service device/codec (`RIFE_DEVICE`, `RIFE_CODEC`), persistent `PracticalRIFEVideoInferenceRunner` startup/loading, request-value pass-through for factor/scale/playback/quality options, output file verification, and small worker-friendly response shaping.
+- `Dockerfile` — repository-root-context BentoML service image that copies only dependency metadata, `src/`, `configs/`, and service files; starts BentoML on `0.0.0.0:3000`; defaults to CUDA plus `h264_nvenc`; expects model weights, optional model repos, and `/shared/rife` as mounted paths.
+- `docker-compose.gpu.example.yml` — one-service/one-GPU example named `rife-gpu0`, with `CUDA_VISIBLE_DEVICES=0`, NVIDIA video driver capabilities for NVENC, GPU device reservation, `/shared/rife` bind mount, model/config mounts, and host port `3000`.
+- `smoke_test.py` — standalone stdlib HTTP smoke client for `POST /interpolate_video`; validates response JSON and checks that the requested output path exists and is non-empty.
+- `README.md` — quick service contract, local serve, Compose, and smoke-client reference.
 
 ## `raw_data/`
 
@@ -336,6 +352,7 @@ Stage 1 MLflow infrastructure with PostgreSQL metadata storage and MinIO artifac
 Human-facing project documentation.
 
 - `stage1_ml_core.md` — Stage 1 workflow notes for current implemented milestones.
+- `bentoml_practical_rife_mvp_service.md` — Stage 3 worker-facing Practical-RIFE BentoML MVP service run/debug guide, including request/response contract, shared `/shared/rife` path contract, local serve, Docker/Compose GPU commands, curl/smoke-client checks, `pirsii_interpolator` integration notes, limitations, and troubleshooting.
 - `stage2_inference_runtime_refactor.md` — final Stage 2 handoff covering runtime structure, Practical-RIFE v4.26 PyTorch CUDA serving recommendation, ONNX Runtime CUDA alternative, BentoML example paths, local fixed 2x/Nx video inference behavior, optional Practical-RIFE first-triplet quality evaluation, backend boundaries, and backend/service developer next steps.
 - `stage2_5_inference_runtime_stabilization.md` — Stage 2.5 final accepted status and handoff notes for accepted ONNX artifacts, real-image equivalence, batch/video inference, video-pipeline benchmarks including Practical-RIFE quality-evaluation timing, serving recommendations, and known limitations.
 

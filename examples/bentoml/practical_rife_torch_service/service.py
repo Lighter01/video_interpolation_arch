@@ -33,6 +33,7 @@ class PracticalRIFETorchService:
         output_path: str,
         interpolation_factor: int = 2,
         scale: float = 1.0,
+        output_playback_mode: str = "real_time",
         enable_quality_evaluation: bool = True,
     ) -> dict[str, object]:
         result = self.runner.run(
@@ -40,12 +41,16 @@ class PracticalRIFETorchService:
             output_path=Path(output_path),
             interpolation_factor=interpolation_factor,
             scale=scale,
+            output_playback_mode=output_playback_mode,
             enable_quality_evaluation=enable_quality_evaluation,
         )
         return {
             "output_path": str(result.output_path),
             "interpolation_factor": result.interpolation_factor,
             "scale": scale,
+            "input_fps": result.input_fps,
+            "output_fps": result.output_fps,
+            "output_playback_mode": result.output_playback_mode,
             "backend": result.runtime_backend,
             "execution_mode": result.execution_mode,
             "pairs_processed": result.pairs_processed,

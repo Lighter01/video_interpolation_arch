@@ -175,6 +175,7 @@ class PracticalRIFEVideoInferenceRunner:
         output_playback_mode: str | VideoOutputPlaybackMode | None = None,
         encoder_options: Mapping[str, Any] | None = None,
         enable_quality_evaluation: bool | None = None,
+        quality_sample_count: int | None = None,
         quality_triplet_output_dir: str | PathLike[str] | None = None,
         write_quality_triplets: bool | None = None,
     ) -> VideoInferenceResult:
@@ -197,6 +198,15 @@ class PracticalRIFEVideoInferenceRunner:
         self.load()
         model_config = self._video_model_config(resolved_scale)
         quality_enabled = self.config.quality_evaluation_enabled if enable_quality_evaluation is None else enable_quality_evaluation
+        resolved_quality_sample_count = (
+            self.config.quality_sample_count if quality_sample_count is None else quality_sample_count
+        )
+        if (
+            isinstance(resolved_quality_sample_count, bool)
+            or not isinstance(resolved_quality_sample_count, int)
+            or resolved_quality_sample_count < 0
+        ):
+            raise ValueError("quality_sample_count must be a non-negative integer.")
         quality_write_triplets = self.config.quality_write_triplets if write_quality_triplets is None else write_quality_triplets
         resolved_output_playback_mode = (
             self.config.output_playback_mode
@@ -222,7 +232,7 @@ class PracticalRIFEVideoInferenceRunner:
             quality_evaluation=VideoQualityEvaluationConfig(
                 enabled=quality_enabled,
                 triplet_output_dir=resolved_quality_dir,
-                sample_count=self.config.quality_sample_count,
+                sample_count=resolved_quality_sample_count,
                 max_image_side=self.config.quality_max_image_side,
                 write_triplets=quality_write_triplets,
                 fail_policy="warn",
@@ -349,6 +359,7 @@ def run_practical_rife_video_inference(
     codec: str = DEFAULT_SERVING_CODEC,
     output_playback_mode: str | VideoOutputPlaybackMode = VideoOutputPlaybackMode.REAL_TIME,
     enable_quality_evaluation: bool = True,
+    quality_sample_count: int | None = None,
     quality_triplet_output_dir: str | PathLike[str] | None = None,
     write_quality_triplets: bool = False,
     settings: Settings | None = None,
@@ -374,6 +385,7 @@ def run_practical_rife_video_inference(
             codec=codec,
             output_playback_mode=output_playback_mode,
             enable_quality_evaluation=enable_quality_evaluation,
+            quality_sample_count=quality_sample_count,
             quality_triplet_output_dir=quality_triplet_output_dir,
             write_quality_triplets=write_quality_triplets,
         )

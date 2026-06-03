@@ -1,0 +1,37 @@
+services:
+  rife-gpu0:
+    build:
+      context: ../..
+      dockerfile: services/practical_rife_bentoml/Dockerfile
+    image: video-interpolation/practical-rife-bentoml:mvp
+    container_name: rife-gpu0
+    ports:
+      - "3000:3000"
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      MODEL_WEIGHTS_ROOT: /app/model_weights
+      MODEL_REPOS_ROOT: /app/model_repos
+      DATASET_ROOT: /app/datasets
+      RIFE_SHARED_DIR: /shared/rife
+      RIFE_DEVICE: ${RIFE_DEVICE:-cuda}
+      RIFE_CODEC: ${RIFE_CODEC:-h264_nvenc}
+      BENTOML_HOST: 0.0.0.0
+      BENTOML_PORT: "3000"
+    volumes:
+      - ${RIFE_SHARED_DIR:-/shared/rife}:/shared/rife
+      - ../../model_weights:/app/model_weights:ro
+      - ../../model_repos:/app/model_repos:ro
+      - ../../configs:/app/configs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+# From another Compose service on the same network, call:
+#   RIFE_SERVICE_URL=http://rife-gpu0:3000
+# This example intentionally runs one BentoML service instance for one visible GPU.

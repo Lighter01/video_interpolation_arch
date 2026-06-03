@@ -148,6 +148,14 @@ The ONNX example constructs the same serving runner with `backend="onnx"` and `p
 
 Both examples accept simple path strings, runtime `interpolation_factor`, runtime `scale`, `output_playback_mode`, and `enable_quality_evaluation`. They return a small metadata dictionary including output path, input/output FPS, output playback mode, backend, execution mode, pairs processed, frames written, `psnr_mean`, `ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error`. They are compatibility examples only: no upload API, queue, database, object storage, auth, frontend, Docker deployment, or production orchestration is included.
 
+Stage 3 adds the worker-compatible MVP BentoML service under:
+
+```text
+services/practical_rife_bentoml/
+```
+
+That service is the current integration target for `pirsii_interpolator`: Practical-RIFE v4.26, PyTorch, CUDA, sequential arbitrary-Nx video inference, path-based `POST /interpolate_video`, `/shared/rife` shared-volume contract, Dockerfile, one-GPU Compose example, and smoke client. Use `docs/bentoml_practical_rife_mvp_service.md` for run/debug steps and worker handoff details. The older files in `examples/bentoml/` remain developer compatibility examples, not the worker MVP service.
+
 Stage 2 closeout validation status:
 
 - Full tests passed with `UV_CACHE_DIR=/tmp/uv-cache uv run pytest`: `156 passed`.
