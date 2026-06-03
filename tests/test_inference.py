@@ -20,6 +20,8 @@ from video_interpolation.batch_inference import (
 from video_interpolation.cli import app
 from video_interpolation.inference import (
     VideoInferenceConfig,
+    VideoOutputPlaybackMode,
+    resolve_output_fps,
     resolve_encoder_options,
     run_ema_video_inference,
     run_video_inference,
@@ -36,6 +38,7 @@ def test_video_inference_config_parses_pyav_output_fields() -> None:
         {
             "input_path": "raw_data/tmp_test/Dora.mp4",
             "output_path": "outputs/inference/test.mp4",
+            "output_playback_mode": "slow_motion",
             "codec": "libx264",
             "container": "mp4",
             "pix_fmt": "yuv420p",
@@ -49,8 +52,31 @@ def test_video_inference_config_parses_pyav_output_fields() -> None:
     config.validate()
     assert config.codec == "libx264"
     assert config.container == "mp4"
+    assert config.resolved_output_playback_mode() is VideoOutputPlaybackMode.SLOW_MOTION
     assert config.encoder_options_by_codec["libx264"]["preset"] == "slow"
     assert config.encoder_options["crf"] == "21"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_fps"),
+    [
+        (VideoOutputPlaybackMode.REAL_TIME, 96.0),
+        (VideoOutputPlaybackMode.SLOW_MOTION, 24.0),
+    ],
+)
+def test_output_fps_resolution_uses_playback_mode(mode: VideoOutputPlaybackMode, expected_fps: float) -> None:
+    assert resolve_output_fps(24.0, 4, mode) == expected_fps
+
+
+def test_video_inference_config_rejects_invalid_output_playback_mode() -> None:
+    config = VideoInferenceConfig(
+        input_path=Path("in.mp4"),
+        output_path=Path("out.mp4"),
+        output_playback_mode="invalid",
+    )
+
+    with pytest.raises(ValueError, match="output_playback_mode"):
+        config.validate()
 
 
 def test_encoder_option_resolution_uses_codec_specific_defaults_without_leaking_options() -> None:
@@ -128,6 +154,42 @@ def test_pyav_inference_writer_writes_readable_video_and_preserves_audio(tmp_pat
         assert len(container.streams.video) == 1
         assert len(container.streams.audio) == 1
         assert len(list(container.decode(video=0))) == 3
+
+
+def test_slow_motion_playback_keeps_input_fps_and_skips_audio(tmp_path) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "slow_motion.mp4"
+    _write_synthetic_input_video(input_path)
+
+    result = run_ema_video_inference(
+        VideoInferenceConfig(
+            input_path=input_path,
+            output_path=output_path,
+            model=_runtime_model_config(),
+            interpolation_mode=InferenceMode.ARBITRARY_NX,
+            interpolation_factor=4,
+            output_playback_mode=VideoOutputPlaybackMode.SLOW_MOTION,
+            codec="libx264",
+            encoder_options={"crf": "28"},
+            limit_pairs=1,
+            mlflow=MlflowRunConfig(enabled=False),
+        ),
+        settings=Settings(),
+        adapter=_RuntimeAdapter(),
+    )
+
+    assert result.frames_written == 5
+    assert result.input_fps == pytest.approx(24.0)
+    assert result.output_fps == pytest.approx(24.0)
+    assert result.output_playback_mode == "slow_motion"
+    assert result.audio_streams_available == 1
+    assert result.audio_streams_preserved == 0
+    assert result.timing.audio_remux_sec == 0.0
+
+    with av.open(str(output_path)) as container:
+        assert len(container.streams.video) == 1
+        assert len(container.streams.audio) == 0
+        assert len(list(container.decode(video=0))) == 5
 
 
 @pytest.mark.parametrize(
@@ -645,6 +707,45 @@ def test_rife_cli_rejects_invalid_scale_before_model_execution() -> None:
     assert "scale" in result.output
 
 
+def test_ema_cli_passes_output_playback_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[VideoInferenceConfig] = []
+
+    def fake_run(config: VideoInferenceConfig, **_kwargs):
+        captured.append(config)
+        return object()
+
+    monkeypatch.setattr("video_interpolation.cli.run_ema_video_inference", fake_run)
+    monkeypatch.setattr("video_interpolation.cli._print_video_inference_summary", lambda _result: None)
+
+    default_result = CliRunner().invoke(
+        app,
+        [
+            "ema",
+            "infer-video",
+            "--config",
+            "configs/inference/ema_vfi_small_2x.yaml",
+            "--disable-mlflow",
+        ],
+    )
+    slow_result = CliRunner().invoke(
+        app,
+        [
+            "ema",
+            "infer-video",
+            "--config",
+            "configs/inference/ema_vfi_small_2x.yaml",
+            "--output-playback-mode",
+            "slow_motion",
+            "--disable-mlflow",
+        ],
+    )
+
+    assert default_result.exit_code == 0
+    assert slow_result.exit_code == 0
+    assert captured[0].resolved_output_playback_mode() is VideoOutputPlaybackMode.REAL_TIME
+    assert captured[1].resolved_output_playback_mode() is VideoOutputPlaybackMode.SLOW_MOTION
+
+
 def test_existing_ema_fixed_2x_config_remains_compatible() -> None:
     config = VideoInferenceConfig.from_mapping(OmegaConf.to_container(OmegaConf.load("configs/inference/ema_vfi_small_2x.yaml")))
 
@@ -653,6 +754,7 @@ def test_existing_ema_fixed_2x_config_remains_compatible() -> None:
     assert config.resolved_interpolation_mode() is InferenceMode.FIXED_2X
     assert config.resolved_interpolation_factor() == 2
     assert config.resolved_interpolation_timesteps() == (0.5,)
+    assert config.resolved_output_playback_mode() is VideoOutputPlaybackMode.REAL_TIME
 
 
 def test_baseline_adapter_reuses_video_inference_workflow(tmp_path) -> None:
@@ -720,6 +822,7 @@ def test_batch_inference_discovers_videos_and_preserves_relative_output_layout(t
                 "output_video": "outputs/baselines/blend/nested/b_2x.mp4",
                 "status": "ok",
                 "pairs_processed": 1,
+                "output_playback_mode": "real_time",
                 "interpolation_mode": "fixed_2x",
                 "interpolation_factor": 2,
                 "runtime_backend": "adapter",
@@ -744,6 +847,8 @@ def test_batch_inference_discovers_videos_and_preserves_relative_output_layout(t
     assert "model_inference_elapsed_sec" in csv_text
     assert "decode_sec" in csv_text
     assert "audio_remux_sec" in csv_text
+    assert "output_playback_mode" in csv_text
+    assert "real_time" in csv_text
     assert "interpolation_mode" in csv_text
     assert "fixed_2x" in csv_text
     assert "runtime_options" in csv_text

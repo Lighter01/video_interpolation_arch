@@ -69,6 +69,7 @@ Serving defaults:
 - interpolation mode: `arbitrary_nx`;
 - service-level interpolation factor: integer `2..4`;
 - Practical-RIFE scale: `1.0` by default, allowed values `0.25`, `0.5`, `1.0`, `2.0`, and `4.0`;
+- output playback mode: `real_time` by default;
 - first-triplet quality evaluation: enabled by default with warn fail policy;
 - default codec for examples: `libx264`.
 
@@ -84,6 +85,7 @@ result = run_practical_rife_video_inference(
     output_path="/tmp/dora_rife_4x.mp4",
     interpolation_factor=4,
     scale=1.0,
+    output_playback_mode="real_time",
 )
 ```
 
@@ -107,10 +109,16 @@ result = runner.run(
     output_path="/tmp/dora_rife_4x.mp4",
     interpolation_factor=4,
     scale=1.0,
+    output_playback_mode="slow_motion",
 )
 ```
 
 Serving quality evaluation is implemented below the BentoML layer in the shared inference stack. It evaluates up to 16 first overlapping source triplets by default, resizes quality-only frames so the larger side is at most 360 pixels, and returns aggregate `quality_psnr_mean`, `quality_ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error` through `VideoInferenceResult`. Triplet PNG persistence is disabled by default; pass `write_quality_triplets=True` and `quality_triplet_output_dir=...` when a backend worker wants Vimeo-style triplets written inside a request-specific temporary directory. Pass `enable_quality_evaluation=False` to `runner.run(...)` or `run_practical_rife_video_inference(...)` to disable quality evaluation for a request.
+
+`output_playback_mode` controls only output timing:
+
+- `real_time`: writes the generated sequence at `input_fps * interpolation_factor`, preserving approximate source duration and current audio remux behavior.
+- `slow_motion`: writes the same generated sequence at original `input_fps`, increasing playback duration and omitting audio because no time-stretching is implemented.
 
 Use ONNX Runtime only when the deployment will package the accepted artifact and the adjacent external-data file:
 
@@ -138,13 +146,14 @@ The PyTorch example is the recommended/default serving proof. It constructs `Pra
 
 The ONNX example constructs the same serving runner with `backend="onnx"` and `provider="CUDAExecutionProvider"`. It demonstrates the alternate backend only; CUDA-provider validation still depends on a CUDA-capable environment with ONNX Runtime CUDA available.
 
-Both examples accept simple path strings, runtime `interpolation_factor`, runtime `scale`, and `enable_quality_evaluation`. They return a small metadata dictionary including output path, backend, execution mode, pairs processed, frames written, `psnr_mean`, `ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error`. They are compatibility examples only: no upload API, queue, database, object storage, auth, frontend, Docker deployment, or production orchestration is included.
+Both examples accept simple path strings, runtime `interpolation_factor`, runtime `scale`, `output_playback_mode`, and `enable_quality_evaluation`. They return a small metadata dictionary including output path, input/output FPS, output playback mode, backend, execution mode, pairs processed, frames written, `psnr_mean`, `ssim_mean`, `quality_triplets_written`, `quality_triplet_output_dir`, and `quality_error`. They are compatibility examples only: no upload API, queue, database, object storage, auth, frontend, Docker deployment, or production orchestration is included.
 
 Stage 2 closeout validation status:
 
 - Full tests passed with `UV_CACHE_DIR=/tmp/uv-cache uv run pytest`: `156 passed`.
 - Lint passed with `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests`.
 - Milestone 9 documentation-only rerun used the same fallback cache because the default uv cache path is read-only in the sandbox; `UV_CACHE_DIR=/tmp/uv-cache uv run pytest` reported `156 passed, 59 warnings`, and `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` reported `All checks passed`.
+- Slow-motion output playback follow-up validation reported `172 passed, 59 warnings` for `UV_CACHE_DIR=/tmp/uv-cache uv run pytest`; `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests` reported `All checks passed`; a bounded baseline CLI smoke with `--output-playback-mode slow_motion` wrote output at input FPS and preserved `0/1` audio streams.
 - Focused serving tests validate config defaults, service-level factor/scale checks, fake-video facade execution, persistent runner reuse, and BentoML example imports/defaults.
 - CUDA smokes are deferred in this environment because `torch.cuda.is_available()` returned `False`. ONNX Runtime lists `CUDAExecutionProvider`, but CUDA-provider serving behavior still needs a CUDA-capable smoke run before production claims.
 
@@ -190,14 +199,14 @@ These commands use synthetic tensor pairs and do not write videos.
 
 ## Local Video Inference
 
-Local EMA-VFI and Practical-RIFE video inference now use the same request/result runtime API as tensor-pair inference. Video decoding, tensor conversion, frame interleaving, PyAV/FFmpeg encoding, and audio remuxing remain project-owned in `src/video_interpolation/inference.py`.
+Local EMA-VFI and Practical-RIFE video inference now use the same request/result runtime API as tensor-pair inference. Video decoding, tensor conversion, frame interleaving, PyAV/FFmpeg encoding, output playback mode resolution, and real-time audio remuxing remain project-owned in `src/video_interpolation/inference.py`.
 
 For each neighboring input-frame pair `(frame_i, frame_i+1)`:
 
 - `fixed_2x` uses `interpolation_factor=2`, timestep `0.5`, and writes one generated frame;
 - `arbitrary_nx` validates a runtime/CLI factor in `2..8`, generates `N - 1` frames at `1/N, 2/N, ..., (N-1)/N`, and writes them in timestep order;
 - output order is `original_i`, generated frames, then `original_i+1`;
-- output FPS is `input_fps * interpolation_factor`.
+- output playback defaults to `real_time`, where FPS is `input_fps * interpolation_factor`; `slow_motion` keeps the same frame sequence at original input FPS and omits audio.
 - `execution_mode=batched` is the default for EMA-VFI and Practical-RIFE local video inference and routes neighboring pairs through `ModelBatchRequest` chunks;
 - `execution_mode=sequential` keeps the older one-pair-at-a-time path for debugging and low-VRAM runs.
 

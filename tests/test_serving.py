@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import importlib.util
+import inspect
 
 import av
 import numpy as np
@@ -38,6 +39,7 @@ def test_practical_rife_serving_config_defaults_to_torch_cuda_sequential_nx() ->
     assert config.execution_mode.value == "sequential"
     assert config.interpolation_mode is InferenceMode.ARBITRARY_NX
     assert config.codec == DEFAULT_SERVING_CODEC
+    assert config.output_playback_mode.value == "real_time"
     assert config.min_interpolation_factor == MIN_SERVING_INTERPOLATION_FACTOR
     assert config.max_interpolation_factor == MAX_SERVING_INTERPOLATION_FACTOR
     assert config.default_scale == 1.0
@@ -82,6 +84,8 @@ def test_practical_rife_serving_rejects_invalid_static_config_values() -> None:
         PracticalRIFEServingConfig(quality_write_triplets=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="quality_max_image_side"):
         PracticalRIFEServingConfig(quality_max_image_side=0)
+    with pytest.raises(ValueError, match="output_playback_mode"):
+        PracticalRIFEServingConfig(output_playback_mode="bad")
 
 
 def test_practical_rife_serving_runner_fails_before_model_load_for_bad_paths(tmp_path: Path) -> None:
@@ -126,7 +130,13 @@ def test_practical_rife_serving_runner_reuses_loaded_adapter_across_requests(tmp
     adapter = _ServingRuntimeAdapter()
     runner = PracticalRIFEVideoInferenceRunner(adapter=adapter, settings=Settings())
 
-    first = runner.run(input_path=input_path, output_path=first_output, interpolation_factor=2, scale=0.5)
+    first = runner.run(
+        input_path=input_path,
+        output_path=first_output,
+        interpolation_factor=2,
+        scale=0.5,
+        output_playback_mode="slow_motion",
+    )
     second = runner.run(input_path=input_path, output_path=second_output, interpolation_factor=4, scale=0.5)
 
     assert adapter.load_count == 1
@@ -135,6 +145,10 @@ def test_practical_rife_serving_runner_reuses_loaded_adapter_across_requests(tmp
     assert second.frames_written == 5
     assert first.execution_mode == "sequential"
     assert second.execution_mode == "sequential"
+    assert first.output_playback_mode == "slow_motion"
+    assert second.output_playback_mode == "real_time"
+    assert first.output_fps == pytest.approx(first.input_fps)
+    assert second.output_fps == pytest.approx(second.input_fps * 4)
     assert first.runtime_options["scale"] == 0.5
     assert second.runtime_options["scale"] == 0.5
 
@@ -157,11 +171,13 @@ def test_practical_rife_serving_convenience_function_uses_facade(monkeypatch: py
         output_path=output_path,
         interpolation_factor=3,
         scale=0.5,
+        output_playback_mode="slow_motion",
         settings=Settings(),
     )
 
     assert result.frames_written == 4
     assert result.interpolation_factor == 3
+    assert result.output_playback_mode == "slow_motion"
     assert result.runtime_backend == RuntimeBackendKind.TORCH.value
     assert len(created) == 1
     assert created[0].load_count == 1
@@ -192,6 +208,12 @@ def test_bentoml_examples_import_and_expose_expected_defaults() -> None:
     assert isinstance(onnx_runner, PracticalRIFEVideoInferenceRunner)
     assert not torch_runner.is_loaded
     assert not onnx_runner.is_loaded
+    assert "output_playback_mode" in inspect.signature(
+        torch_service.PracticalRIFETorchService.apis["interpolate_video"].func
+    ).parameters
+    assert "output_playback_mode" in inspect.signature(
+        onnx_service.PracticalRIFEOnnxService.apis["interpolate_video"].func
+    ).parameters
 
 
 class _ServingRuntimeAdapter(ModelAdapter):

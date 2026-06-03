@@ -38,6 +38,7 @@ def test_video_benchmark_config_defaults_to_video_input_and_validates_arguments(
     assert config.input_path == DEFAULT_VIDEO_BENCHMARK_INPUT
     assert config.backend is RuntimeBackendKind.ONNX
     assert config.execution_mode is BenchmarkExecutionMode.BATCHED
+    assert config.output_playback_mode.value == "real_time"
     assert config.quality_evaluation is not None
     assert not config.quality_evaluation.enabled
     assert rife_config.quality_evaluation is not None
@@ -61,6 +62,9 @@ def test_video_benchmark_config_defaults_to_video_input_and_validates_arguments(
             input_path=Path("input.mp4"),
             input_dir=Path("videos"),
         )
+
+    with pytest.raises(ValueError, match="output_playback_mode"):
+        VideoBenchmarkConfig(model_name="ema_vfi_small", output_playback_mode="bad")
 
 
 def test_discover_benchmark_videos_supports_single_input_and_directory_limit(tmp_path: Path) -> None:
@@ -135,6 +139,7 @@ def test_run_video_benchmark_sequential_records_pipeline_timings(tmp_path: Path)
     assert record.pairs_processed == 1
     assert record.frames_written == 3
     assert record.generated_frames == 1
+    assert record.output_playback_mode == "real_time"
     assert record.decode_sec >= 0
     assert record.preprocessing_sec >= 0
     assert record.model_inference_sec >= 0
@@ -246,6 +251,7 @@ def test_write_video_benchmark_report_writes_json_and_csv(tmp_path: Path) -> Non
     assert "decode_sec" in csv_text
     assert "audio_remux_sec" in csv_text
     assert "quality_evaluation_sec" in csv_text
+    assert "output_playback_mode" in csv_text
 
 
 def test_benchmark_profile_slug_includes_video_runtime_profile() -> None:
@@ -393,6 +399,7 @@ def _record(
         execution_mode="sequential",
         interpolation_mode="fixed_2x",
         interpolation_factor=2,
+        output_playback_mode="real_time",
         inference_batch_size=1,
         repeat_index=0,
         input_video=Path("input.mp4"),

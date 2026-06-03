@@ -51,6 +51,11 @@ class VideoInferenceExecutionMode(StrEnum):
     BATCHED = "batched"
 
 
+class VideoOutputPlaybackMode(StrEnum):
+    REAL_TIME = "real_time"
+    SLOW_MOTION = "slow_motion"
+
+
 @dataclass(frozen=True)
 class VideoInferenceConfig:
     input_path: Path
@@ -63,6 +68,7 @@ class VideoInferenceConfig:
     inference_batch_size: int | None = None
     runtime_options: Mapping[str, Any] = field(default_factory=dict)
     output_fps_multiplier: float = 2.0
+    output_playback_mode: VideoOutputPlaybackMode | str = VideoOutputPlaybackMode.REAL_TIME
     codec: str = "h264_nvenc"
     container: str | None = None
     pix_fmt: str = "yuv420p"
@@ -97,6 +103,7 @@ class VideoInferenceConfig:
         factor = self.resolved_interpolation_factor()
         self.resolved_execution_mode()
         self.resolved_inference_batch_size()
+        self.resolved_output_playback_mode()
         resolve_interpolation_timesteps(mode, factor)
         _validate_model_interpolation_support(self.model, mode, factor)
         _validate_runtime_options(self.runtime_options)
@@ -151,6 +158,15 @@ class VideoInferenceConfig:
             raise ValueError("inference_batch_size must be a positive integer when set")
         return value
 
+    def resolved_output_playback_mode(self) -> VideoOutputPlaybackMode:
+        try:
+            return VideoOutputPlaybackMode(str(self.output_playback_mode))
+        except ValueError as exc:
+            allowed = ", ".join(mode.value for mode in VideoOutputPlaybackMode)
+            raise ValueError(
+                f"Unsupported output_playback_mode: {self.output_playback_mode!r}. Allowed: {allowed}."
+            ) from exc
+
 
 @dataclass(frozen=True)
 class VideoInferenceTiming:
@@ -170,6 +186,7 @@ class VideoInferenceResult:
     output_path: Path
     input_fps: float
     output_fps: float
+    output_playback_mode: str
     interpolation_mode: str
     interpolation_factor: int
     interpolation_timesteps: tuple[float, ...]
@@ -268,6 +285,7 @@ def run_video_inference(
     interpolation_timesteps = config.resolved_interpolation_timesteps()
     requested_execution_mode = config.resolved_execution_mode()
     inference_batch_size = config.resolved_inference_batch_size()
+    output_playback_mode = config.resolved_output_playback_mode()
     runtime_options = dict(config.runtime_options)
     settings = settings or load_settings()
     input_path = _resolve_project_path(settings, config.input_path)
@@ -286,7 +304,7 @@ def run_video_inference(
     total_pairs = max(frame_count - 1, 0) if frame_count else None
     if config.limit_pairs is not None and total_pairs is not None:
         total_pairs = min(total_pairs, config.limit_pairs)
-    output_fps = fps * interpolation_factor
+    output_fps = resolve_output_fps(fps, interpolation_factor, output_playback_mode)
     output_rate = _fps_to_fraction(output_fps)
     encoder_options = resolve_encoder_options(
         config.codec,
@@ -344,11 +362,12 @@ def run_video_inference(
             pix_fmt=config.pix_fmt,
             encoder_options=encoder_options,
         )
-        audio_stream_pairs = _add_audio_streams(
-            input_audio_container,
-            output_container,
-            codec=config.codec,
-        )
+        if output_playback_mode is VideoOutputPlaybackMode.REAL_TIME:
+            audio_stream_pairs = _add_audio_streams(
+                input_audio_container,
+                output_container,
+                codec=config.codec,
+            )
         _emit_progress(
             progress_callback,
             "encoding_start",
@@ -356,6 +375,7 @@ def run_video_inference(
             container=config.container or "inferred",
             codec=config.codec,
             output_fps=output_fps,
+            output_playback_mode=output_playback_mode.value,
             interpolation_mode=interpolation_mode.value,
             interpolation_factor=interpolation_factor,
             interpolation_timesteps=interpolation_timesteps,
@@ -424,14 +444,15 @@ def run_video_inference(
         encode_start = perf_counter()
         _flush_video_stream(output_container, video_stream, config.codec)
         encode_sec += perf_counter() - encode_start
-        audio_remux_start = perf_counter()
-        audio_streams_preserved = _copy_audio_streams(
-            input_audio_container,
-            output_container,
-            audio_stream_pairs,
-            max_duration_sec=_audio_duration_limit(config, frames_written, output_fps),
-        )
-        audio_remux_sec = perf_counter() - audio_remux_start
+        if output_playback_mode is VideoOutputPlaybackMode.REAL_TIME:
+            audio_remux_start = perf_counter()
+            audio_streams_preserved = _copy_audio_streams(
+                input_audio_container,
+                output_container,
+                audio_stream_pairs,
+                max_duration_sec=_audio_duration_limit(config, frames_written, output_fps),
+            )
+            audio_remux_sec = perf_counter() - audio_remux_start
         if quality_config.enabled:
             quality_start = perf_counter()
             quality_result = _run_quality_evaluation(
@@ -493,6 +514,7 @@ def run_video_inference(
             "runtime_options": runtime_options,
             "output_fps_multiplier": interpolation_factor,
             "legacy_output_fps_multiplier_config": config.output_fps_multiplier,
+            "output_playback_mode": output_playback_mode.value,
             "output_fps": output_fps,
             "codec": config.codec,
             "container": config.container,
@@ -542,6 +564,7 @@ def run_video_inference(
         output_path=output_path,
         input_fps=fps,
         output_fps=output_fps,
+        output_playback_mode=output_playback_mode.value,
         interpolation_mode=interpolation_mode.value,
         interpolation_factor=interpolation_factor,
         interpolation_timesteps=interpolation_timesteps,
@@ -689,6 +712,28 @@ def with_inference_quality_evaluation(
     quality_evaluation: VideoQualityEvaluationConfig,
 ) -> VideoInferenceConfig:
     return replace(config, quality_evaluation=quality_evaluation)
+
+
+def with_inference_output_playback_mode(
+    config: VideoInferenceConfig,
+    output_playback_mode: str | VideoOutputPlaybackMode | None,
+) -> VideoInferenceConfig:
+    if output_playback_mode is None:
+        return config
+    return replace(config, output_playback_mode=output_playback_mode)
+
+
+def resolve_output_fps(
+    input_fps: float,
+    interpolation_factor: int,
+    output_playback_mode: VideoOutputPlaybackMode | str,
+) -> float:
+    mode = VideoOutputPlaybackMode(str(output_playback_mode))
+    if mode is VideoOutputPlaybackMode.REAL_TIME:
+        return input_fps * interpolation_factor
+    if mode is VideoOutputPlaybackMode.SLOW_MOTION:
+        return input_fps
+    raise AssertionError(f"Unhandled output playback mode: {mode}")
 
 
 def resolve_encoder_options(

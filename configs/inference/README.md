@@ -27,6 +27,7 @@ Inputs and flags:
 | `--interpolation-factor` | integer or omitted | model config default | Runtime interpolation factor, validated in `2..8` |
 | `--rife-scale` | float or omitted | Practical-RIFE config default | Request-time Practical-RIFE scale. Allowed: `0.25`, `0.5`, `1.0`, `2.0`, `4.0`; upstream recommends `0.5` for high-resolution inputs such as 4K |
 | `--codec` | string or omitted | config-driven | Overrides the FFmpeg/PyAV encoder for every output |
+| `--output-playback-mode` | string | `real_time` | `real_time` writes at `input_fps * interpolation_factor`; `slow_motion` writes the same frames at input FPS and drops audio |
 | `--target`, `--method` | repeatable string | omitted means active defaults | Selects one or more targets/subgroups to run |
 | `--disable-mlflow` | flag | false | Disables MLflow logging for every individual run |
 | `--continue-on-error/--fail-fast` | boolean flag | `--continue-on-error` | Either continue remaining runs after failures or stop at the first failure |
@@ -62,6 +63,7 @@ uv run python -m video_interpolation.cli infer-all-videos \
   --target models \
   --mode arbitrary_nx \
   --interpolation-factor 4 \
+  --output-playback-mode slow_motion \
   --rife-scale 0.5 \
   --codec libx264 \
   --limit-pairs 2 \
@@ -84,9 +86,9 @@ outputs/inference/
   baselines/farneback/inference_measurements.csv
 ```
 
-The suffix follows the runtime factor, for example `_2x.mp4`, `_4x.mp4`, or `_8x.mp4`. The command preserves relative subdirectories from `--input-dir`, so repeated filenames in different folders do not collide. It reuses the same PyAV/FFmpeg writer, audio remuxing, frame ordering, timing metrics, and MLflow behavior as the single-video commands below.
+The suffix follows the runtime factor, for example `_2x.mp4`, `_4x.mp4`, or `_8x.mp4`. The command preserves relative subdirectories from `--input-dir`, so repeated filenames in different folders do not collide. It reuses the same PyAV/FFmpeg writer, playback-mode handling, frame ordering, timing metrics, and MLflow behavior as the single-video commands below.
 
-Each `inference_measurements.csv` contains one row per input video for that target with `interpolation_mode`, `interpolation_factor`, `execution_mode`, `requested_execution_mode`, `inference_batch_size`, `batch_chunks_processed`, `model_batch_requests`, `runtime_backend`, `model_inference_elapsed_sec`, `total_elapsed_sec`, pair counts, FPS values, throughput, audio preservation counts, output path, status, MLflow run id, and error text when a run fails.
+Each `inference_measurements.csv` contains one row per input video for that target with `interpolation_mode`, `interpolation_factor`, `output_playback_mode`, `execution_mode`, `requested_execution_mode`, `inference_batch_size`, `batch_chunks_processed`, `model_batch_requests`, `runtime_backend`, `model_inference_elapsed_sec`, `total_elapsed_sec`, pair counts, FPS values, throughput, audio preservation counts, output path, status, MLflow run id, and error text when a run fails.
 Practical-RIFE request options such as `scale` are recorded in the `runtime_options` column.
 
 ONNX export and ONNX Runtime equivalence validation are model-runtime developer workflows, not local video inference workflows. Use `ema export-onnx` / `rife export-onnx` and `ema validate-onnx` / `rife validate-onnx` with files under `configs/models/`; exported artifacts are written under `model_exports/onnx/`, and validation reports are written under `outputs/onnx_validation/`.
@@ -117,7 +119,7 @@ Common failures:
 
 ## `baseline_2x.yaml`
 
-Purpose: run local 2x video interpolation with one non-neural baseline method using the same PyAV/FFmpeg writer, frame ordering, audio remuxing, and MLflow behavior as model inference.
+Purpose: run local 2x video interpolation with one non-neural baseline method using the same PyAV/FFmpeg writer, frame ordering, output playback mode, and MLflow behavior as model inference.
 
 Baseline-specific `model` fields:
 
@@ -126,7 +128,7 @@ Baseline-specific `model` fields:
 | `model.model_name` | string | default `baseline_blend` | Names the baseline in logs, metrics, reports, and MLflow params | Yes |
 | `model.baseline_name` | string | `duplicate_left`, `blend`, or `farneback`; default `blend` | Selects the baseline predictor used for every neighboring frame pair | Yes |
 
-All top-level video-output fields match model inference configs: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `output_fps_multiplier`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`. Baselines remain fixed 2x; `output_fps_multiplier` is kept for config compatibility, while runtime model paths compute output FPS from `interpolation_factor`.
+All top-level video-output fields match model inference configs: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `output_fps_multiplier`, `output_playback_mode`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`. Baselines remain fixed 2x; `output_fps_multiplier` is kept for config compatibility, while `output_playback_mode` controls effective output FPS behavior.
 
 Command:
 
@@ -145,8 +147,8 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
-- Uses PyAV/FFmpeg encoding and preserves/remuxes compatible input audio streams.
-- Logs codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
+- Uses PyAV/FFmpeg encoding. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` omits audio because no time-stretching is implemented.
+- Logs codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
 - Does not modify source videos, datasets, manifests, model repositories, or model weights.
 
 Common failures:
@@ -160,7 +162,7 @@ Common failures:
 
 Purpose: run local fixed 2x or arbitrary Nx video interpolation with EMA-VFI-small. Fixed 2x inserts one generated middle frame; arbitrary Nx inserts `N - 1` generated frames between each neighboring input-frame pair.
 
-Local video inference calls the Stage 2 `FramePairRequest`/`FramePairResult` API. Video decoding, tensor conversion, frame ordering, PyAV/FFmpeg encoding, and audio remuxing remain model-independent project code.
+Local video inference calls the Stage 2 `FramePairRequest`/`FramePairResult` API. Video decoding, tensor conversion, frame ordering, PyAV/FFmpeg encoding, output playback mode resolution, and real-time audio remuxing remain model-independent project code.
 
 Fields:
 
@@ -174,7 +176,8 @@ Fields:
 | `interpolation_factor` | integer or `null` | `2..8`; config default `2` | Runtime factor. `fixed_2x` requires `2`; `arbitrary_nx` writes `N - 1` generated frames per pair | Yes |
 | `execution_mode` | string | `batched` or `sequential`; default `batched` | Uses chunked model-batch video inference for EMA/RIFE when available, or explicit pair-by-pair fallback when `sequential` | Yes |
 | `inference_batch_size` | integer or `null` | default `null`; effective fallback `1` unless the model config sets one | Maximum flattened model rows per video batch. For Nx, one source pair consumes `interpolation_factor - 1` rows | Yes |
-| `output_fps_multiplier` | float | default `2.0` | Compatibility field retained from Stage 1; effective output FPS is input FPS multiplied by `interpolation_factor` | Yes |
+| `output_fps_multiplier` | float | default `2.0` | Compatibility field retained from Stage 1; not authoritative for new output playback behavior | Yes |
+| `output_playback_mode` | string | `real_time` or `slow_motion`; default `real_time` | Selects output timing. `real_time` writes at `input_fps * interpolation_factor`; `slow_motion` writes the same generated frame sequence at input FPS and drops audio | Yes |
 | `codec` | string | default `h264_nvenc`; examples `libx264`, `h264_nvenc`, `libx265`, `hevc_nvenc` | FFmpeg/PyAV encoder name | Yes |
 | `container` | string or `null` | default `null`; examples `mp4`, `matroska`, `mov`, `webm` | Output container format. `null` lets PyAV infer from `output_path` | Yes |
 | `pix_fmt` | string | default `yuv420p` | Encoded video pixel format; `yuv420p` is the safest MP4 playback choice | Yes |
@@ -218,6 +221,7 @@ uv run python -m video_interpolation.cli ema infer-video \
   --interpolation-factor 4 \
   --execution-mode batched \
   --inference-batch-size 6 \
+  --output-playback-mode slow_motion \
   --codec libx264 \
   --limit-pairs 2 \
   --disable-mlflow
@@ -227,14 +231,14 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Original and generated frames are interleaved as `left, generated frames in timestep order, right, ...`.
-- Output FPS is `input_fps * interpolation_factor`.
+- Output playback defaults to `real_time`, where FPS is `input_fps * interpolation_factor`; `slow_motion` keeps original input FPS and omits audio.
 - In `batched` mode, EMA/RIFE video inference decodes source frames in overlapping chunks. The last source frame of one chunk becomes the first source frame of the next chunk, so boundary pairs are neither dropped nor duplicated.
 - `inference_batch_size` caps flattened model rows. For example, 4x interpolation uses three rows per source pair, so `--inference-batch-size 6` processes two source pairs per video chunk when the adapter supports batch execution.
 - `sequential` mode keeps the older pair-by-pair request path for low-VRAM debugging. Adapters that do not expose `predict_frame_pairs_batch(...)` automatically record `execution_mode=sequential_fallback`.
-- Uses PyAV/FFmpeg for output encoding and preserves/remuxes input audio streams when compatible with the selected output container.
+- Uses PyAV/FFmpeg for output encoding. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` omits audio.
 - When `limit_pairs` is set for a smoke run, the output video is intentionally partial and remuxed audio is capped to the partial output duration.
 - Measures model inference elapsed time around Stage 2 request/result runtime calls, total processing time, model pairs/sec, and total pairs/sec.
-- Logs codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when MLflow is enabled.
+- Logs codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when MLflow is enabled.
 - Does not modify source videos, datasets, manifests, model repositories, or model weights.
 - Requires CUDA for the current EMA adapter.
 - Stage 2 inference selects `EMA-VFI/ours_small_t.pkl` so fixed 2x can run as `t=0.5` and arbitrary Nx can use the same timestep-capable checkpoint. EMA training/fine-tuning configs remain on `ours_small.pkl`.
@@ -264,7 +268,7 @@ Common failures:
 
 ## `amt_s_2x.yaml`
 
-Purpose: run local 2x video interpolation with AMT-S using the same PyAV/FFmpeg writer, frame ordering, audio remuxing, and MLflow behavior as EMA inference.
+Purpose: run local 2x video interpolation with AMT-S using the same PyAV/FFmpeg writer, frame ordering, output playback mode, and MLflow behavior as EMA inference.
 
 AMT-specific `model` fields:
 
@@ -280,7 +284,7 @@ AMT-specific `model` fields:
 | `model.divisor` | integer | default `16` | Input padding divisor before AMT inference | Yes |
 | `model.strict_checkpoint` | boolean | default `true` | Strict state-dict loading | Yes |
 
-All top-level video-output fields match `ema_vfi_small_2x.yaml`: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `output_fps_multiplier`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`. AMT-S remains a fixed-2x legacy path.
+All top-level video-output fields match `ema_vfi_small_2x.yaml`: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `output_fps_multiplier`, `output_playback_mode`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`. AMT-S remains a fixed-2x legacy path.
 
 Command:
 
@@ -298,8 +302,8 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
-- Uses PyAV/FFmpeg encoding and preserves/remuxes compatible input audio streams.
-- Logs codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
+- Uses PyAV/FFmpeg encoding. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` omits audio.
+- Logs codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
 - Does not modify source videos, datasets, manifests, model repositories, or model weights.
 
 Common failures:
@@ -310,7 +314,7 @@ Common failures:
 
 ## `practical_rife_v4_26_2x.yaml`
 
-Purpose: run local fixed 2x or arbitrary Nx video interpolation with Practical-RIFE v4.26 using the same PyAV/FFmpeg writer, frame ordering, audio remuxing, and MLflow behavior as EMA inference.
+Purpose: run local fixed 2x or arbitrary Nx video interpolation with Practical-RIFE v4.26 using the same PyAV/FFmpeg writer, frame ordering, output playback mode, and MLflow behavior as EMA inference.
 
 Practical-RIFE v4.26 is the Stage 2 default. The same selected runtime/checkpoint handles fixed 2x (`t=0.5`) and arbitrary Nx direct timesteps from the runtime factor.
 
@@ -331,7 +335,7 @@ Practical-RIFE-specific `model` fields:
 | `model.inference_batch_size` | integer or `null` | default `null` | Optional model-runtime flattened-row cap used when the top-level video config does not override it | Yes |
 | `model.strict_checkpoint` | boolean | default `false` | Non-strict state-dict loading accepts extra training-only keys | Yes |
 
-All top-level video-output fields match `ema_vfi_small_2x.yaml`: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `runtime_options`, `output_fps_multiplier`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`.
+All top-level video-output fields match `ema_vfi_small_2x.yaml`: `input_path`, `output_path`, `limit_pairs`, `interpolation_mode`, `interpolation_factor`, `execution_mode`, `inference_batch_size`, `runtime_options`, `output_fps_multiplier`, `output_playback_mode`, `codec`, `container`, `pix_fmt`, `frame_format`, `encoder_options_by_codec`, `encoder_options`, and `mlflow`.
 
 Command:
 
@@ -367,12 +371,12 @@ Side effects and outputs:
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
 - In batched mode, output order remains `left, generated frames in timestep order, right`; the implementation batches neighboring source pairs only at the model-call level.
-- Uses PyAV/FFmpeg encoding and preserves/remuxes compatible input audio streams.
-- Logs codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
+- Uses PyAV/FFmpeg encoding. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` omits audio.
+- Logs codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, timing metrics, frame/pair counts, and FPS metrics to MLflow when enabled.
 - Does not modify source videos, datasets, manifests, model repositories, or model weights.
 - Fixed 2x is the `interpolation_factor=2`, `t=0.5` case. Arbitrary Nx uses the request/CLI-provided factor and direct timesteps.
 - `--scale` is a request-time Practical-RIFE option, not a factor-specific config. Valid values are `0.25`, `0.5`, `1.0`, `2.0`, and `4.0`; the upstream README recommends `0.5` for high-resolution inputs such as 4K.
-- Output FPS is `input_fps * interpolation_factor`; generated frames are written in timestep order before the next original frame.
+- Output playback defaults to `real_time`, where FPS is `input_fps * interpolation_factor`; `slow_motion` keeps original input FPS and writes generated frames in the same timestep order before the next original frame.
 
 Tensor-pair Nx smoke:
 

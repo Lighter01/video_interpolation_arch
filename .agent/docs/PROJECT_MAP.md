@@ -38,6 +38,7 @@ Agent-facing documentation and development logs.
 ### `.agent/docs/exec-plans/active/`
 
 - `misc_video_quality_evaluation.execplan.md` — active task plan for optional Practical-RIFE first-triplet video quality evaluation in the shared inference pipeline.
+- `misc_slow_motion_output_playback.execplan.md` — active task plan for real-time vs slow-motion output playback timing in the shared video inference pipeline.
 
 ### `.agent/docs/exec-plans/completed/`
 
@@ -57,8 +58,8 @@ Developer-facing examples outside the installable package.
 
 Minimal BentoML compatibility examples for Practical-RIFE v4.26 serving.
 
-- `practical_rife_torch_service/service.py` — recommended/default Practical-RIFE PyTorch service example using `backend="torch"`, `device="cuda"`, sequential arbitrary-Nx video inference, runtime factor `2..4`, and runtime scale.
-- `practical_rife_onnx_service/service.py` — alternate Practical-RIFE ONNX Runtime service example using `backend="onnx"`, `CUDAExecutionProvider`, the same sequential serving facade, and scale matching the loaded ONNX artifact.
+- `practical_rife_torch_service/service.py` — recommended/default Practical-RIFE PyTorch service example using `backend="torch"`, `device="cuda"`, sequential arbitrary-Nx video inference, runtime factor `2..4`, runtime scale, and output playback mode.
+- `practical_rife_onnx_service/service.py` — alternate Practical-RIFE ONNX Runtime service example using `backend="onnx"`, `CUDAExecutionProvider`, the same sequential serving facade, output playback mode, and scale matching the loaded ONNX artifact.
 
 ## `raw_data/`
 
@@ -238,18 +239,18 @@ Local Stage 1 Python package.
 - `batch_inference.py` — helpers for directory-wide inference video discovery, target selection, factor-aware output path layout, MLflow run naming, and per-target measurement CSV export including runtime options plus video execution-mode/batch metadata.
 - `baselines.py` — duplication, blending, and Farneback baseline prediction/evaluation over triplet manifests.
 - `amt_preflight.py` — lightweight AMT-S import/model/checkpoint compatibility check.
-- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, Stage 2.5 video-pipeline runtime benchmarks (`benchmark runtime`), request-time Practical-RIFE scale and optional quality-evaluation flags, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export, synthetic ONNX Runtime validation, real-pair ONNX Runtime validation (`validate-onnx-real`), shared dynamo/legacy export options (`--exporter`, `--dynamic-hw-multiple`, `--artifact-stem`), legacy artifact-resolution flags, EMA validation padding override (`--divisor`), EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
+- `cli.py` — Typer developer CLI with settings display, directory-wide fixed 2x/Nx inference, output playback mode selection (`real_time` or `slow_motion`) for video inference/benchmarks, Stage 2.5 video-pipeline runtime benchmarks (`benchmark runtime`), request-time Practical-RIFE scale and optional quality-evaluation flags, EMA-VFI-small and Practical-RIFE tensor-pair Nx smoke commands, EMA/Practical-RIFE ONNX export, synthetic ONNX Runtime validation, real-pair ONNX Runtime validation (`validate-onnx-real`), shared dynamo/legacy export options (`--exporter`, `--dynamic-hw-multiple`, `--artifact-stem`), legacy artifact-resolution flags, EMA validation padding override (`--divisor`), EMA-VFI-small, AMT-S, and Practical-RIFE preflight/adapter/inference/validation commands, EMA training commands, data workflows, triplet manifest inspection, baseline evaluation/inference, and MLflow smoke logging.
 - `contracts.py` — compact artifact contracts and relative-path validation helpers.
 - `data/` — source preprocessing and source-level indexing code.
 - `ema_preflight.py` — lightweight EMA-VFI-small import/checkpoint compatibility check.
 - `image_io.py` — shared tensor/image conversion and triplet-style prediction sample writing helpers.
-- `inference_benchmark.py` — Stage 2.5 video-pipeline runtime benchmarks over `run_video_inference(...)`, with single-video or directory inputs, CSV/JSON reports, generated benchmark videos, timing breakdowns for decode/preprocess/model/postprocess/encode/audio remux/quality evaluation, ONNX benchmark adapter wrappers, Practical-RIFE quality evaluation enabled by default, and optional aggregate MLflow logging.
+- `inference_benchmark.py` — Stage 2.5 video-pipeline runtime benchmarks over `run_video_inference(...)`, with single-video or directory inputs, output playback mode pass-through, CSV/JSON reports, generated benchmark videos, timing breakdowns for decode/preprocess/model/postprocess/encode/audio remux/quality evaluation, ONNX benchmark adapter wrappers, Practical-RIFE quality evaluation enabled by default, and optional aggregate MLflow logging.
 - `inference_runtime/` — Stage 2 request/result inference API, true model-batch API contracts, interpolation mode validation, runtime input/output containers, backend abstractions, ONNX export configuration including selectable legacy/dynamo exporters and constrained dynamic batch/H/W shapes, ONNX batch-request runtimes where viable, and ONNX validation reports with graph I/O plus padded/output shape metadata.
-- `inference.py` — shared local video inference workflow using Stage 2 request/result calls, chunked PyTorch model-batch video inference for EMA/RIFE through `ModelBatchRequest`, fixed 2x/arbitrary Nx frame interleaving, configurable `execution_mode` and `inference_batch_size`, request runtime options such as Practical-RIFE scale, optional first-triplet Practical-RIFE quality evaluation, PyAV/FFmpeg output encoding, audio remuxing, and sequential/legacy fallback.
+- `inference.py` — shared local video inference workflow using Stage 2 request/result calls, chunked PyTorch model-batch video inference for EMA/RIFE through `ModelBatchRequest`, fixed 2x/arbitrary Nx frame interleaving, configurable `execution_mode` and `inference_batch_size`, request runtime options such as Practical-RIFE scale, optional first-triplet Practical-RIFE quality evaluation, PyAV/FFmpeg output encoding, real-time/slow-motion output playback mode resolution, audio remuxing only for real-time playback, and sequential/legacy fallback.
 - `metrics.py` — PSNR, SSIM, optional LPIPS scoring, metric aggregation, and CSV export.
 - `mlflow.py` — MLflow tracking setup and logging helpers for Stage 1 runs plus Stage 2.5 benchmark runs.
 - `rife_preflight.py` — lightweight Practical-RIFE import/model/checkpoint compatibility check.
-- `serving.py` — Practical-RIFE v4.26 serving-readiness facade with PyTorch CUDA defaults, ONNX alternative provider/artifact handling, sequential arbitrary-Nx factor `2..4` validation, first-triplet quality evaluation enabled by default with warn fail policy, persistent runner, convenience one-shot function, and ONNX video adapter wrapper.
+- `serving.py` — Practical-RIFE v4.26 serving-readiness facade with PyTorch CUDA defaults, ONNX alternative provider/artifact handling, sequential arbitrary-Nx factor `2..4` validation, output playback mode pass-through, first-triplet quality evaluation enabled by default with warn fail policy, persistent runner, convenience one-shot function, and ONNX video adapter wrapper.
 - `video_quality/` — Practical-RIFE online quality evaluation helpers: config/result types, first-contiguous-triplet decoding, quality-only proportional resizing to max side 360 by default, opt-in Vimeo-style triplet writing, and PSNR/SSIM aggregation without scene-cut filtering.
 - `settings.py` — `pydantic-settings` runtime settings loaded from `.env`.
 - `training.py` — EMA-VFI-small fine-tuning and eval-only runner over triplet manifests.

@@ -15,6 +15,7 @@ MEASUREMENT_COLUMNS = (
     "frames_written",
     "input_fps",
     "output_fps",
+    "output_playback_mode",
     "interpolation_mode",
     "interpolation_factor",
     "execution_mode",

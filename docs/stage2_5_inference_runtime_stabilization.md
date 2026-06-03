@@ -238,7 +238,7 @@ Chunking behavior:
 - The final source frame of one chunk becomes the carried first source frame of the next chunk, so a sequence `[0, 1, 2, 3, 4]` with two pairs per chunk is processed as `[0, 1, 2]` then `[2, 3, 4]`.
 - Outputs for each pair are written immediately in pair order: generated frames in timestep order, then the next original source frame.
 - Fixed 2x writes one generated frame per pair. Nx writes `N - 1` generated frames per pair.
-- Output FPS is always `input_fps * interpolation_factor`.
+- Output playback defaults to `real_time`, where output FPS is `input_fps * interpolation_factor`. Use `--output-playback-mode slow_motion` for the same generated frame sequence at original input FPS; slow-motion outputs omit audio.
 
 `inference_batch_size` controls flattened model rows, matching the Milestone 5 runtime contract. For fixed 2x, one source pair uses one row. For Nx, one source pair uses `interpolation_factor - 1` rows. A 4x run with `--inference-batch-size 6` therefore processes up to two source pairs per video chunk and passes the same flattened-row cap to the model runtime through `ModelBatchRequest.backend_options`.
 
@@ -253,6 +253,7 @@ uv run python -m video_interpolation.cli rife infer-video \
   --interpolation-factor 2 \
   --execution-mode batched \
   --inference-batch-size 2 \
+  --output-playback-mode real_time \
   --codec libx264 \
   --limit-pairs 2 \
   --disable-mlflow
@@ -265,6 +266,7 @@ uv run python -m video_interpolation.cli ema infer-video \
   --interpolation-factor 4 \
   --execution-mode batched \
   --inference-batch-size 3 \
+  --output-playback-mode slow_motion \
   --codec libx264 \
   --limit-pairs 1 \
   --disable-mlflow
@@ -272,7 +274,7 @@ uv run python -m video_interpolation.cli ema infer-video \
 
 Use `--execution-mode sequential` to compare frame ordering or reduce memory pressure. If CUDA runs out of memory in batched mode, retry with a smaller `--inference-batch-size`, lower resolution input, or sequential mode. No automatic downscaling is performed.
 
-Measurement metadata now records `requested_execution_mode`, actual `execution_mode`, `inference_batch_size`, `batch_chunks_processed`, `model_batch_requests`, interpolation mode/factor, runtime backend, existing timing fields, FPS, pair/frame counts, and audio preservation counts. Directory-wide `batch_inference.py` remains orchestration over many files/targets; it is separate from true model batching and now writes the same execution metadata to each `inference_measurements.csv`.
+Measurement metadata now records `requested_execution_mode`, actual `execution_mode`, `inference_batch_size`, `batch_chunks_processed`, `model_batch_requests`, interpolation mode/factor, output playback mode, runtime backend, existing timing fields, FPS, pair/frame counts, and audio preservation counts. Directory-wide `batch_inference.py` remains orchestration over many files/targets; it is separate from true model batching and now writes the same execution metadata to each `inference_measurements.csv`.
 
 CPU smoke status in this environment:
 
@@ -298,7 +300,8 @@ The benchmark command uses the same Stage 2.5 video inference path as normal loc
 - `ModelBatchRequest` for `--execution-mode batched`;
 - EMA-VFI and Practical-RIFE PyTorch adapters for `--backend torch`;
 - accepted EMA-VFI and Practical-RIFE ONNX runtime artifacts for `--backend onnx`;
-- PyAV/FFmpeg video encoding, flush, and audio remuxing.
+- PyAV/FFmpeg video encoding, flush, and audio remuxing for real-time playback outputs.
+- `--output-playback-mode real_time|slow_motion`, defaulting to `real_time`; slow-motion benchmark outputs keep original FPS and report zero audio streams preserved.
 
 **For pytorch backend** `--device cuda/cpu` is supported. So:
 
@@ -387,7 +390,7 @@ Report fields:
 - identity and execution fields: model, backend, execution mode, interpolation mode/factor, requested batch size, input path, relative input path, output video path, and status/error;
 - ONNX provenance: provider and artifact path;
 - counts: source frames, pairs processed, generated frames, frames written, batch chunks, and model batch requests;
-- timing: decode, preprocessing/tensor conversion, model inference, postprocessing/frame conversion, video encode/flush, audio remux, quality evaluation, and total time;
+- timing and playback: input/output FPS, output playback mode, decode, preprocessing/tensor conversion, model inference, postprocessing/frame conversion, video encode/flush, audio remux, quality evaluation, and total time;
 - quality: quality enabled flag, quality PSNR/SSIM means, quality triplet count, triplet output directory, and quality error when warn-policy evaluation fails;
 - throughput: pairs/sec, generated frames/sec, model-only pairs/sec, and model-only generated frames/sec;
 - memory: peak PyTorch CUDA VRAM when a CUDA PyTorch benchmark is run in a CUDA-capable environment.

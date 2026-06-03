@@ -23,6 +23,7 @@ from video_interpolation.inference import (
     AdapterFactory,
     VideoInferenceConfig,
     VideoInferenceExecutionMode,
+    VideoOutputPlaybackMode,
     VideoInferenceResult,
     run_video_inference,
 )
@@ -70,6 +71,7 @@ class VideoBenchmarkConfig:
     limit_pairs: int | None = None
     interpolation_mode: InferenceMode | str = InferenceMode.FIXED_2X
     interpolation_factor: int = 2
+    output_playback_mode: VideoOutputPlaybackMode | str = VideoOutputPlaybackMode.REAL_TIME
     device: str = "cpu"
     providers: Sequence[str] = ("CPUExecutionProvider",)
     onnx_path: Path | None = None
@@ -99,6 +101,13 @@ class VideoBenchmarkConfig:
         backend = RuntimeBackendKind(str(self.backend))
         execution_mode = BenchmarkExecutionMode(str(self.execution_mode))
         interpolation_mode = InferenceMode(str(self.interpolation_mode))
+        try:
+            output_playback_mode = VideoOutputPlaybackMode(str(self.output_playback_mode))
+        except ValueError as exc:
+            allowed = ", ".join(mode.value for mode in VideoOutputPlaybackMode)
+            raise ValueError(
+                f"Unsupported output_playback_mode: {self.output_playback_mode!r}. Allowed: {allowed}."
+            ) from exc
         resolve_interpolation_timesteps(interpolation_mode, self.interpolation_factor)
         if self.input_dir is None and self.input_path is None:
             raise ValueError("Either input_path or input_dir must be set.")
@@ -119,6 +128,7 @@ class VideoBenchmarkConfig:
         object.__setattr__(self, "backend", backend)
         object.__setattr__(self, "execution_mode", execution_mode)
         object.__setattr__(self, "interpolation_mode", interpolation_mode)
+        object.__setattr__(self, "output_playback_mode", output_playback_mode)
         object.__setattr__(self, "input_path", Path(self.input_path) if self.input_path is not None else None)
         object.__setattr__(self, "input_dir", Path(self.input_dir) if self.input_dir is not None else None)
         object.__setattr__(self, "output_dir", Path(self.output_dir))
@@ -152,6 +162,7 @@ class VideoBenchmarkRecord:
     execution_mode: str
     interpolation_mode: str
     interpolation_factor: int
+    output_playback_mode: str
     inference_batch_size: int | None
     repeat_index: int
     input_video: Path
@@ -199,6 +210,7 @@ class VideoBenchmarkRecord:
             "execution_mode": self.execution_mode,
             "interpolation_mode": self.interpolation_mode,
             "interpolation_factor": self.interpolation_factor,
+            "output_playback_mode": self.output_playback_mode,
             "inference_batch_size": self.inference_batch_size,
             "repeat_index": self.repeat_index,
             "input_video": str(self.input_video),
@@ -470,6 +482,7 @@ def benchmark_params(
         "limit_pairs": config.limit_pairs,
         "interpolation_mode": config.interpolation_mode.value,
         "interpolation_factor": config.interpolation_factor,
+        "output_playback_mode": config.output_playback_mode.value,
         "device": config.device,
         "providers": tuple(config.providers),
         "artifact_path": str(artifact_path) if artifact_path is not None else None,
@@ -616,6 +629,7 @@ def _video_inference_config(
         limit_pairs=config.limit_pairs,
         interpolation_mode=config.interpolation_mode,
         interpolation_factor=config.interpolation_factor,
+        output_playback_mode=config.output_playback_mode,
         execution_mode=VideoInferenceExecutionMode(config.execution_mode.value),
         inference_batch_size=config.inference_batch_size,
         runtime_options=runtime_options,
@@ -647,6 +661,7 @@ def _record_from_result(
         execution_mode=result.execution_mode,
         interpolation_mode=result.interpolation_mode,
         interpolation_factor=result.interpolation_factor,
+        output_playback_mode=result.output_playback_mode,
         inference_batch_size=result.inference_batch_size,
         repeat_index=repeat_index,
         input_video=result.input_path,
@@ -704,6 +719,7 @@ def _failed_record(
         execution_mode=config.execution_mode.value,
         interpolation_mode=config.interpolation_mode.value,
         interpolation_factor=config.interpolation_factor,
+        output_playback_mode=config.output_playback_mode.value,
         inference_batch_size=config.inference_batch_size,
         repeat_index=repeat_index,
         input_video=video.input_path,
@@ -859,6 +875,7 @@ def _empty_record_row() -> dict[str, object]:
         execution_mode="",
         interpolation_mode="",
         interpolation_factor=0,
+        output_playback_mode="",
         inference_batch_size=None,
         repeat_index=0,
         input_video=Path(),

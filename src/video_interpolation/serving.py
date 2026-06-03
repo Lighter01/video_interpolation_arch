@@ -13,6 +13,7 @@ from video_interpolation.adapters.rife import PracticalRIFEAdapter, PracticalRIF
 from video_interpolation.inference import (
     VideoInferenceConfig,
     VideoInferenceExecutionMode,
+    VideoOutputPlaybackMode,
     VideoInferenceResult,
     run_video_inference,
 )
@@ -57,6 +58,7 @@ class PracticalRIFEServingConfig:
     min_interpolation_factor: int = MIN_SERVING_INTERPOLATION_FACTOR
     max_interpolation_factor: int = MAX_SERVING_INTERPOLATION_FACTOR
     codec: str = DEFAULT_SERVING_CODEC
+    output_playback_mode: VideoOutputPlaybackMode | str = VideoOutputPlaybackMode.REAL_TIME
     pix_fmt: str = "yuv420p"
     frame_format: str = "rgb24"
     mlflow_enabled: bool = False
@@ -69,9 +71,11 @@ class PracticalRIFEServingConfig:
         backend = _coerce_backend(self.backend)
         mode = _coerce_mode(self.interpolation_mode)
         execution_mode = _coerce_execution_mode(self.execution_mode)
+        output_playback_mode = _coerce_output_playback_mode(self.output_playback_mode)
         object.__setattr__(self, "backend", backend)
         object.__setattr__(self, "interpolation_mode", mode)
         object.__setattr__(self, "execution_mode", execution_mode)
+        object.__setattr__(self, "output_playback_mode", output_playback_mode)
         if self.model_name != PRACTICAL_RIFE_SERVING_MODEL:
             raise ValueError(f"Practical-RIFE serving supports only {PRACTICAL_RIFE_SERVING_MODEL}.")
         if mode is not InferenceMode.ARBITRARY_NX:
@@ -168,6 +172,7 @@ class PracticalRIFEVideoInferenceRunner:
         scale: float | None = None,
         limit_pairs: int | None = None,
         codec: str | None = None,
+        output_playback_mode: str | VideoOutputPlaybackMode | None = None,
         encoder_options: Mapping[str, Any] | None = None,
         enable_quality_evaluation: bool | None = None,
         quality_triplet_output_dir: str | PathLike[str] | None = None,
@@ -193,6 +198,11 @@ class PracticalRIFEVideoInferenceRunner:
         model_config = self._video_model_config(resolved_scale)
         quality_enabled = self.config.quality_evaluation_enabled if enable_quality_evaluation is None else enable_quality_evaluation
         quality_write_triplets = self.config.quality_write_triplets if write_quality_triplets is None else write_quality_triplets
+        resolved_output_playback_mode = (
+            self.config.output_playback_mode
+            if output_playback_mode is None
+            else _coerce_output_playback_mode(output_playback_mode)
+        )
         inference_config = VideoInferenceConfig(
             input_path=resolved_input,
             output_path=resolved_output,
@@ -204,6 +214,7 @@ class PracticalRIFEVideoInferenceRunner:
             inference_batch_size=1,
             runtime_options={"scale": resolved_scale},
             output_fps_multiplier=float(factor),
+            output_playback_mode=resolved_output_playback_mode,
             codec=codec or self.config.codec,
             pix_fmt=self.config.pix_fmt,
             frame_format=self.config.frame_format,
@@ -336,6 +347,7 @@ def run_practical_rife_video_inference(
     scale: float = 1.0,
     limit_pairs: int | None = None,
     codec: str = DEFAULT_SERVING_CODEC,
+    output_playback_mode: str | VideoOutputPlaybackMode = VideoOutputPlaybackMode.REAL_TIME,
     enable_quality_evaluation: bool = True,
     quality_triplet_output_dir: str | PathLike[str] | None = None,
     write_quality_triplets: bool = False,
@@ -360,6 +372,7 @@ def run_practical_rife_video_inference(
             scale=scale,
             limit_pairs=limit_pairs,
             codec=codec,
+            output_playback_mode=output_playback_mode,
             enable_quality_evaluation=enable_quality_evaluation,
             quality_triplet_output_dir=quality_triplet_output_dir,
             write_quality_triplets=write_quality_triplets,
@@ -433,6 +446,14 @@ def _coerce_execution_mode(mode: VideoInferenceExecutionMode | str) -> VideoInfe
     except ValueError as exc:
         allowed = ", ".join(item.value for item in VideoInferenceExecutionMode)
         raise ValueError(f"Unsupported serving execution_mode: {mode!r}. Allowed: {allowed}.") from exc
+
+
+def _coerce_output_playback_mode(mode: VideoOutputPlaybackMode | str) -> VideoOutputPlaybackMode:
+    try:
+        return VideoOutputPlaybackMode(str(mode))
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in VideoOutputPlaybackMode)
+        raise ValueError(f"Unsupported serving output_playback_mode: {mode!r}. Allowed: {allowed}.") from exc
 
 
 def _resolve_serving_path(settings: Settings, path: Path) -> Path:

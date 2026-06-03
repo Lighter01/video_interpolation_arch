@@ -71,6 +71,7 @@ from .ema_preflight import PreflightReport, run_ema_vfi_small_preflight
 from .inference import (
     VideoInferenceConfig,
     VideoInferenceExecutionMode,
+    VideoOutputPlaybackMode,
     VideoInferenceResult,
     run_ema_video_inference,
     run_video_inference,
@@ -85,6 +86,7 @@ from .inference import (
     with_inference_limit,
     with_inference_mlflow_disabled,
     with_inference_output,
+    with_inference_output_playback_mode,
     with_inference_quality_evaluation,
     with_inference_runtime_option,
 )
@@ -218,6 +220,7 @@ class _BatchInferenceRecord:
     frames_written: int | None = None
     input_fps: float | None = None
     output_fps: float | None = None
+    output_playback_mode: str | None = None
     interpolation_mode: str | None = None
     interpolation_factor: int | None = None
     execution_mode: str | None = None
@@ -316,6 +319,11 @@ def infer_all_videos(
         "--codec",
         help="Override FFmpeg/PyAV encoder for all outputs, for example libx264 or h264_nvenc.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     target_selection: list[str] | None = typer.Option(
         None,
         "--target",
@@ -379,6 +387,7 @@ def infer_all_videos(
                     inference_batch_size=inference_batch_size,
                     rife_scale=rife_scale,
                     codec=codec,
+                    output_playback_mode=output_playback_mode,
                     disable_mlflow=disable_mlflow,
                 )
                 adapter = target.adapter_factory(target_config.model, settings)
@@ -423,6 +432,7 @@ def infer_all_videos(
                                 f"{payload['output_path']} "
                                 f"codec={payload['codec']} "
                                 f"fps={float(payload['output_fps']):.4f} "
+                                f"playback={payload['output_playback_mode']} "
                                 f"mode={payload['interpolation_mode']} "
                                 f"factor={payload['interpolation_factor']} "
                                 f"audio={payload['audio_streams_to_preserve']}/"
@@ -451,6 +461,7 @@ def infer_all_videos(
                                 frames_written=result.frames_written,
                                 input_fps=result.input_fps,
                                 output_fps=result.output_fps,
+                                output_playback_mode=result.output_playback_mode,
                                 interpolation_mode=result.interpolation_mode,
                                 interpolation_factor=result.interpolation_factor,
                                 execution_mode=result.execution_mode,
@@ -1142,6 +1153,11 @@ def ema_infer_video(
         "--codec",
         help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -1160,6 +1176,7 @@ def ema_infer_video(
     inference_config = with_inference_batch_size(inference_config, inference_batch_size)
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_output_playback_mode(inference_config, output_playback_mode)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     console.print(
         "[bold]Running EMA-VFI-small video inference:[/bold] "
@@ -1403,6 +1420,11 @@ def amt_infer_video(
         "--codec",
         help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -1420,6 +1442,7 @@ def amt_infer_video(
     inference_config = with_inference_limit(inference_config, limit_pairs)
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_output_playback_mode(inference_config, output_playback_mode)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     console.print(f"[bold]Running AMT-S video inference:[/bold] {inference_config.input_path}")
 
@@ -2050,6 +2073,11 @@ def rife_infer_video(
         "--codec",
         help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     enable_quality_evaluation: bool = typer.Option(
         False,
         "--enable-quality-evaluation",
@@ -2114,6 +2142,7 @@ def rife_infer_video(
     )
     inference_config = with_inference_checkpoint(inference_config, checkpoint_path)
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_output_playback_mode(inference_config, output_playback_mode)
     inference_config = with_inference_quality_evaluation(
         inference_config,
         VideoQualityEvaluationConfig(
@@ -2631,6 +2660,11 @@ def baseline_infer_video(
         "--codec",
         help="Override FFmpeg/PyAV encoder name, for example libx264 or h264_nvenc.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     disable_mlflow: bool = typer.Option(
         False,
         "--disable-mlflow",
@@ -2647,6 +2681,7 @@ def baseline_infer_video(
     inference_config = with_inference_output(inference_config, output_path)
     inference_config = with_inference_limit(inference_config, limit_pairs)
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_output_playback_mode(inference_config, output_playback_mode)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     inference_config = replace(
         inference_config,
@@ -2759,6 +2794,11 @@ def benchmark_runtime(
         max=8,
         help="Interpolation factor. Use 2 for fixed_2x and 4/8 for Nx smoke runs.",
     ),
+    output_playback_mode: str = typer.Option(
+        VideoOutputPlaybackMode.REAL_TIME.value,
+        "--output-playback-mode",
+        help="Output playback mode: real_time multiplies FPS, slow_motion keeps input FPS and drops audio.",
+    ),
     limit_pairs: int | None = typer.Option(
         None,
         "--limit-pairs",
@@ -2824,6 +2864,7 @@ def benchmark_runtime(
             limit_pairs=limit_pairs,
             interpolation_mode=mode,
             interpolation_factor=interpolation_factor,
+            output_playback_mode=output_playback_mode,
             device=device,
             providers=_resolve_onnx_cli_providers(provider),
             onnx_path=onnx_path,
@@ -2929,6 +2970,7 @@ def _load_batch_target_config(
     inference_batch_size: int | None,
     rife_scale: float | None,
     codec: str | None,
+    output_playback_mode: str,
     disable_mlflow: bool,
 ) -> VideoInferenceConfig:
     inference_config = VideoInferenceConfig.from_mapping(
@@ -2948,6 +2990,7 @@ def _load_batch_target_config(
             None if rife_scale is None else validate_rife_scale(rife_scale),
         )
     inference_config = with_inference_codec(inference_config, codec)
+    inference_config = with_inference_output_playback_mode(inference_config, output_playback_mode)
     inference_config = with_inference_mlflow_disabled(inference_config, disable_mlflow)
     if target.baseline_name is not None:
         inference_config = replace(
@@ -3014,6 +3057,7 @@ def _batch_measurement_row(record: _BatchInferenceRecord) -> dict[str, object]:
         "frames_written": record.frames_written,
         "input_fps": _optional_float(record.input_fps),
         "output_fps": _optional_float(record.output_fps),
+        "output_playback_mode": record.output_playback_mode,
         "interpolation_mode": record.interpolation_mode,
         "interpolation_factor": record.interpolation_factor,
         "execution_mode": record.execution_mode,
@@ -3354,6 +3398,7 @@ def _print_video_inference_summary(result: VideoInferenceResult) -> None:
     table.add_row("output video", str(result.output_path))
     table.add_row("input fps", f"{result.input_fps:.4f}")
     table.add_row("output fps", f"{result.output_fps:.4f}")
+    table.add_row("output playback", result.output_playback_mode)
     table.add_row("mode", result.interpolation_mode)
     table.add_row("interpolation factor", str(result.interpolation_factor))
     table.add_row("timesteps", ", ".join(f"{timestep:.6g}" for timestep in result.interpolation_timesteps))
@@ -3392,6 +3437,7 @@ def _print_inference_encoding_settings(payload: dict[str, object]) -> None:
     table.add_row("container", str(payload["container"]))
     table.add_row("codec", str(payload["codec"]))
     table.add_row("output fps", f"{float(payload['output_fps']):.4f}")
+    table.add_row("output playback", str(payload["output_playback_mode"]))
     table.add_row("mode", str(payload["interpolation_mode"]))
     table.add_row("interpolation factor", str(payload["interpolation_factor"]))
     table.add_row("timesteps", ", ".join(f"{float(timestep):.6g}" for timestep in payload["interpolation_timesteps"]))

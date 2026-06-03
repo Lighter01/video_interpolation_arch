@@ -5,6 +5,7 @@ model:
   baseline_name: blend
 limit_pairs: null
 output_fps_multiplier: 2.0
+output_playback_mode: real_time
 
 # FFmpeg/PyAV encoder name.
 # Recommended CPU option for baselines: libx264

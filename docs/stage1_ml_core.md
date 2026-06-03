@@ -87,10 +87,10 @@ Side effects and outputs:
 - Baseline output layout is `outputs/inference/baselines/<baseline_name>/<relative_input_dir>/<video_stem>_2x.mp4`.
 - Each target directory also gets `inference_measurements.csv` with one row per input video.
 - Preserves relative subdirectories from `--input-dir` to avoid filename collisions.
-- Reuses the same PyAV/FFmpeg writer, audio remuxing, frame ordering, timing metrics, and MLflow behavior as the single-video commands.
+- Reuses the same PyAV/FFmpeg writer, output playback mode handling, frame ordering, timing metrics, and MLflow behavior as the single-video commands.
 - Prints a final summary table with every target/video status and output path. If any run fails, the command exits non-zero after the summary.
 
-Measurement CSV fields include input/output video paths, status, pair and frame counts, input/output FPS, `model_inference_elapsed_sec`, `total_elapsed_sec`, model and total pairs/sec, audio stream preservation counts, MLflow run id, and error text for failed runs.
+Measurement CSV fields include input/output video paths, status, pair and frame counts, input/output FPS, output playback mode, `model_inference_elapsed_sec`, `total_elapsed_sec`, model and total pairs/sec, audio stream preservation counts, MLflow run id, and error text for failed runs.
 
 ### `ema adapter-check`
 
@@ -369,8 +369,8 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
-- Encodes with PyAV/FFmpeg and preserves/remuxes compatible input audio streams.
-- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
+- Encodes with PyAV/FFmpeg. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` keeps original FPS and omits audio.
+- Logs params, codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
 
 ### `amt validate-candidate`
 
@@ -480,8 +480,8 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
-- Encodes with PyAV/FFmpeg and preserves/remuxes compatible input audio streams.
-- Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
+- Encodes with PyAV/FFmpeg. `real_time` preserves/remuxes compatible input audio streams; `slow_motion` keeps original FPS and omits audio.
+- Logs params, codec/container/pixel-format/frame-format settings, output playback mode, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
 
 ### `rife validate-candidate`
 
@@ -820,7 +820,7 @@ Side effects and outputs:
 
 - Writes a new video to `output_path`.
 - Interleaves original and generated frames as `left, generated_middle, right, ...`.
-- Uses the same PyAV/FFmpeg writer and audio remuxing path as model inference.
+- Uses the same PyAV/FFmpeg writer and output playback mode handling as model inference.
 - Logs params, codec/container/pixel-format/frame-format settings, resolved encoder options, audio preservation counts, output video, config, timing metrics, and pair-throughput metrics to MLflow unless disabled.
 
 ### `mlflow smoke-log`
